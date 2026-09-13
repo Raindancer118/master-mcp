@@ -6,6 +6,7 @@ import proxmox from "./proxmox.js";
 import npm from "./npm.js";
 import uptimeKuma from "./uptimeKuma.js";
 import authentik from "./authentik.js";
+import coolify from "./coolify.js";
 
 export const allServiceModules: ServiceModule[] = [
   cloudflare,
@@ -15,4 +16,5 @@ export const allServiceModules: ServiceModule[] = [
   npm,
   uptimeKuma,
   authentik,
+  coolify,
 ];

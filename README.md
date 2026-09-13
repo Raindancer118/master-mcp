@@ -9,6 +9,7 @@ Ein einziger MCP-Server (stdio, TypeScript) für die Admin-Verwaltung von:
 - **Nginx Proxy Manager / NPMPlus** (Proxy-Hosts, Redirects, Streams, Access-Lists, Zertifikate, Users)
 - **Uptime Kuma** (Monitore, Heartbeats, Wartungsfenster, Status-Pages, Notifications)
 - **Authentik** (Users, Gruppen, Applications, Providers, Outposts, Flows, Events, Invitations)
+- **Coolify** (Applications, Deployments, Datenbanken, Services, Server, Projekte, Teams)
 
 ## Architektur
 
@@ -28,7 +29,7 @@ src/
     registry.ts     - Katalog, Suche, Instanz-Auflösung
     http.ts         - axios-Client-Helper
   services/
-    cloudflare.ts, porkbun.ts, docker.ts, proxmox.ts, npm.ts, uptimeKuma.ts, authentik.ts
+    cloudflare.ts, porkbun.ts, docker.ts, proxmox.ts, npm.ts, uptimeKuma.ts, authentik.ts, coolify.ts
     index.ts        - Aggregiert alle ServiceModules
   index.ts           - MCP-Server-Wiring (stdio)
 ```
@@ -56,7 +57,7 @@ deiner Wahl - stdio-Transport, Env-Variablen aus `.env` werden beim Start via
 ```bash
 npm run dev        # tsx, ohne Build
 npm run typecheck
-npm test           # vitest, 133 Tests über alle 7 Module
+npm test           # vitest, 142 Tests über alle 8 Module
 npm run build
 ```
 
