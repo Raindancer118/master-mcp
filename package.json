@@ -1,0 +1,35 @@
+{
+  "name": "master-mcp",
+  "version": "0.1.0",
+  "description": "Unified admin MCP server: Uptime Kuma, Nginx Proxy Manager / NPMPlus, Porkbun, Cloudflare, Docker, Proxmox",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "master-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "axios": "^1.7.9",
+    "dockerode": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "socket.io-client": "^4.8.1",
+    "zod": "^3.24.1",
+    "zod-to-json-schema": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.31",
+    "@types/node": "^22.10.2",
+    "nock": "^13.5.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
