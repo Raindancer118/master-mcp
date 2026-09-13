@@ -1,9 +1,17 @@
-import "dotenv/config";
+import { config as loadDotenv } from "dotenv";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Registry, McpUserError } from "./core/registry.js";
 import { allServiceModules } from "./services/index.js";
+
+// Registered MCP clients spawn this process with an arbitrary cwd (often the client's own
+// project directory, not this one) - load .env from next to the built dist/index.js, not from
+// process.cwd(), so it's found regardless of where/how the server is launched.
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+loadDotenv({ path: path.join(moduleDir, "..", ".env") });
 
 const registry = new Registry();
 registry.loadFromEnv(allServiceModules, process.env);
