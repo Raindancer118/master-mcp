@@ -37,14 +37,50 @@ function credsFor(instance: InstanceConfig): { baseUrl: string; username: string
   return { baseUrl, username, password };
 }
 
+/** Context handed to `withSession` callbacks: the authenticated socket, plus a way to read the
+ * "monitorList" push without racing it. */
+interface Session {
+  socket: Socket;
+  /** Resolves with the most recent "monitorList" payload - cached if it already arrived
+   * (typically right after login), otherwise waits for the next one. */
+  waitForMonitorList: (timeoutMs?: number) => Promise<Record<string, MonitorObject>>;
+}
+
 /**
  * Opens a fresh Socket.IO connection to this instance, logs in, runs `fn` with the
- * authenticated socket, then always disconnects - even if login or `fn` throws.
+ * authenticated session, then always disconnects - even if login or `fn` throws.
  * Uptime Kuma has no write REST API; all mutation goes through this Socket.IO channel.
  */
-async function withSession<T>(instance: InstanceConfig, fn: (socket: Socket) => Promise<T>): Promise<T> {
+async function withSession<T>(instance: InstanceConfig, fn: (session: Session) => Promise<T>): Promise<T> {
   const { baseUrl, username, password } = credsFor(instance);
   const socket: Socket = io(baseUrl, { transports: ["websocket"], reconnection: false });
+
+  // Uptime Kuma pushes "monitorList" as soon as login succeeds - often before the login ack
+  // callback even fires. The listener must be attached before login is sent, or the event is
+  // missed and any listMonitors/editMonitor call hangs until timeout.
+  let cachedMonitorList: Record<string, MonitorObject> | undefined;
+  let monitorListWaiters: Array<(data: Record<string, MonitorObject>) => void> = [];
+  socket.on("monitorList", (data: Record<string, MonitorObject>) => {
+    cachedMonitorList = data;
+    const waiters = monitorListWaiters;
+    monitorListWaiters = [];
+    for (const waiter of waiters) waiter(data);
+  });
+
+  function waitForMonitorList(timeoutMs = MONITOR_LIST_TIMEOUT_MS): Promise<Record<string, MonitorObject>> {
+    if (cachedMonitorList) return Promise.resolve(cachedMonitorList);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        monitorListWaiters = monitorListWaiters.filter((w) => w !== onData);
+        reject(new Error('Timed out waiting for "monitorList" from Uptime Kuma after login'));
+      }, timeoutMs);
+      const onData = (data: Record<string, MonitorObject>) => {
+        clearTimeout(timer);
+        resolve(data);
+      };
+      monitorListWaiters.push(onData);
+    });
+  }
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -82,7 +118,7 @@ async function withSession<T>(instance: InstanceConfig, fn: (socket: Socket) => 
       });
     });
 
-    return await fn(socket);
+    return await fn({ socket, waitForMonitorList });
   } finally {
     socket.disconnect();
   }
@@ -149,26 +185,17 @@ const addMaintenanceParams = z.object({
 });
 
 /**
- * Logs into `instance`, waits for the pushed "monitorList" event, and returns the raw
+ * Waits for the pushed "monitorList" event (or its cached value) and returns the raw
  * (untrimmed) object for `monitorId` from it. Used whenever a full monitor definition is
  * needed (e.g. to merge partial edits before re-submitting it).
  */
-async function getRawMonitor(socket: Socket, monitorId: number): Promise<MonitorObject> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error('Timed out waiting for "monitorList" from Uptime Kuma after login'));
-    }, MONITOR_LIST_TIMEOUT_MS);
-
-    socket.once("monitorList", (data: Record<string, MonitorObject>) => {
-      clearTimeout(timer);
-      const monitor = data[String(monitorId)];
-      if (!monitor) {
-        reject(new Error(`Monitor ${monitorId} not found`));
-        return;
-      }
-      resolve(monitor);
-    });
-  });
+async function getRawMonitor(session: Session, monitorId: number): Promise<MonitorObject> {
+  const data = await session.waitForMonitorList();
+  const monitor = data[String(monitorId)];
+  if (!monitor) {
+    throw new Error(`Monitor ${monitorId} not found`);
+  }
+  return monitor;
 }
 
 function buildActions(): AnyActionDef[] {
@@ -179,17 +206,9 @@ function buildActions(): AnyActionDef[] {
     readOnly: true,
     destructive: false,
     handler: async (_params, instance) => {
-      return withSession(instance, (socket) => {
-        return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => {
-            reject(new Error('Timed out waiting for "monitorList" from Uptime Kuma after login'));
-          }, MONITOR_LIST_TIMEOUT_MS);
-
-          socket.once("monitorList", (data: Record<string, MonitorObject>) => {
-            clearTimeout(timer);
-            resolve(Object.values(data).map(trimMonitor));
-          });
-        });
+      return withSession(instance, async ({ waitForMonitorList }) => {
+        const data = await waitForMonitorList();
+        return Object.values(data).map(trimMonitor);
       });
     },
   };
@@ -201,7 +220,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: true,
     destructive: false,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const res = await emitAck<{ ok: boolean; data?: unknown[]; msg?: string }>(socket, "getMonitorBeats", [
           params.monitorId,
           params.period ?? 24,
@@ -219,7 +238,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: false,
     destructive: true,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const res = await emitAck<SimpleAck>(socket, "pauseMonitor", [params.monitorId]);
         if (!res.ok) throw new Error(res.msg ?? "pause_monitor failed");
         return { ok: true };
@@ -234,7 +253,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: false,
     destructive: false,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const res = await emitAck<SimpleAck>(socket, "resumeMonitor", [params.monitorId]);
         if (!res.ok) throw new Error(res.msg ?? "resume_monitor failed");
         return { ok: true };
@@ -249,7 +268,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: false,
     destructive: true,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const res = await emitAck<SimpleAck>(socket, "deleteMonitor", [params.monitorId]);
         if (!res.ok) throw new Error(res.msg ?? "delete_monitor failed");
         return { ok: true };
@@ -264,7 +283,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: false,
     destructive: false,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const monitor = {
           type: "http",
           name: params.name,
@@ -291,8 +310,8 @@ function buildActions(): AnyActionDef[] {
     readOnly: false,
     destructive: true,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
-        const current = await getRawMonitor(socket, params.monitorId);
+      return withSession(instance, async (session) => {
+        const current = await getRawMonitor(session, params.monitorId);
         const merged: MonitorObject = {
           ...current,
           id: params.monitorId,
@@ -303,7 +322,7 @@ function buildActions(): AnyActionDef[] {
           ...(params.resendInterval !== undefined ? { resendInterval: params.resendInterval } : {}),
           ...(params.active !== undefined ? { active: params.active } : {}),
         };
-        const res = await emitAck<{ ok: boolean; msg?: string }>(socket, "editMonitor", [{ monitor: merged }]);
+        const res = await emitAck<{ ok: boolean; msg?: string }>(session.socket, "editMonitor", [{ monitor: merged }]);
         if (!res.ok) throw new Error(res.msg ?? "edit_monitor failed");
         return { ok: true };
       });
@@ -317,7 +336,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: true,
     destructive: false,
     handler: async (_params, instance) => {
-      return withSession(instance, (socket) => {
+      return withSession(instance, ({ socket }) => {
         return new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             reject(new Error('Timed out waiting for "notificationList" from Uptime Kuma after login'));
@@ -339,7 +358,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: true,
     destructive: false,
     handler: async (_params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const res = await emitAck<{ ok: boolean; msg?: string; maintenanceList?: unknown[] }>(
           socket,
           "getMaintenanceList",
@@ -358,7 +377,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: false,
     destructive: false,
     handler: async (params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const maintenance = {
           title: params.title,
           description: params.description ?? "",
@@ -386,7 +405,7 @@ function buildActions(): AnyActionDef[] {
     readOnly: true,
     destructive: false,
     handler: async (_params, instance) => {
-      return withSession(instance, async (socket) => {
+      return withSession(instance, async ({ socket }) => {
         const res = await emitAck<{ ok: boolean; msg?: string; statusPageList?: unknown }>(
           socket,
           "getStatusPageList",

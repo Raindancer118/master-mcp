@@ -101,12 +101,10 @@ describe("uptimeKuma service", () => {
       const action = findAction("list_monitors");
       const resultPromise = action.handler({}, makeInstance());
 
-      // Wait a tick so the handler has registered its "monitorList" listener.
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(lastSocket.once).toHaveBeenCalledWith("monitorList", expect.any(Function));
-      const monitorListHandler = lastSocket.once.mock.calls.find((c) => c[0] === "monitorList")?.[1];
+      // The "monitorList" listener is registered synchronously before login is even sent
+      // (it must be, to avoid racing Kuma's post-login push) - no need to wait a tick.
+      expect(lastSocket.on).toHaveBeenCalledWith("monitorList", expect.any(Function));
+      const monitorListHandler = lastSocket.on.mock.calls.find((c) => c[0] === "monitorList")?.[1];
       expect(monitorListHandler).toBeTypeOf("function");
 
       monitorListHandler!({
@@ -135,6 +133,35 @@ describe("uptimeKuma service", () => {
         { id: 2, name: "Local box", type: "ping", url: "10.0.0.5", active: false, interval: 30 },
       ]);
       expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it("still resolves when Kuma pushes monitorList before the login ack (the real-world race)", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        let monitorListHandler: ((data: unknown) => void) | undefined;
+        socket.on.mockImplementation((event: string, handler: (data: unknown) => void) => {
+          if (event === "monitorList") monitorListHandler = handler;
+        });
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          if (event === "login") {
+            // Simulate Kuma pushing "monitorList" before the login ack callback fires.
+            monitorListHandler!({
+              "9": { id: 9, name: "Race", type: "http", url: "https://race.example", active: true, interval: 60 },
+            });
+            const cb = args[args.length - 1] as (res: { ok: boolean }) => void;
+            cb({ ok: true });
+          }
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const action = findAction("list_monitors");
+      const result = await action.handler({}, makeInstance());
+
+      expect(result).toEqual([
+        { id: 9, name: "Race", type: "http", url: "https://race.example", active: true, interval: 60 },
+      ]);
     });
   });
 
@@ -201,10 +228,7 @@ describe("uptimeKuma service", () => {
       const action = findAction("edit_monitor");
       const resultPromise = action.handler({ monitorId: 1, name: "Renamed" }, makeInstance());
 
-      await Promise.resolve();
-      await Promise.resolve();
-
-      const monitorListHandler = lastSocket.once.mock.calls.find((c) => c[0] === "monitorList")?.[1];
+      const monitorListHandler = lastSocket.on.mock.calls.find((c) => c[0] === "monitorList")?.[1];
       expect(monitorListHandler).toBeTypeOf("function");
 
       monitorListHandler!({
@@ -218,9 +242,8 @@ describe("uptimeKuma service", () => {
         },
       });
 
-      // Let getRawMonitor resolve before editMonitor is emitted.
-      await Promise.resolve();
-      await Promise.resolve();
+      // Let the login ack and getRawMonitor's promise chain settle before editMonitor is emitted.
+      for (let i = 0; i < 6; i++) await Promise.resolve();
 
       const editCall = lastSocket.emit.mock.calls.find((c) => c[0] === "editMonitor");
       expect(editCall).toBeDefined();
@@ -248,10 +271,7 @@ describe("uptimeKuma service", () => {
       const action = findAction("edit_monitor");
       const resultPromise = action.handler({ monitorId: 5 }, makeInstance());
 
-      await Promise.resolve();
-      await Promise.resolve();
-
-      const monitorListHandler = lastSocket.once.mock.calls.find((c) => c[0] === "monitorList")?.[1];
+      const monitorListHandler = lastSocket.on.mock.calls.find((c) => c[0] === "monitorList")?.[1];
       monitorListHandler!({});
 
       await expect(resultPromise).rejects.toThrow("Monitor 5 not found");

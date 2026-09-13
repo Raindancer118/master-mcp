@@ -90,6 +90,62 @@ describe("npm service", () => {
 
       await expect(action.handler({}, instance)).rejects.toThrow(/Invalid credentials/);
     });
+
+    it("falls back to the __Host-Http-token cookie when NPMPlus returns no body token", async () => {
+      const hosts = [{ id: 1, domain_names: ["example.com"], forward_host: "10.0.0.10", forward_port: 8080 }];
+
+      nock(BASE_URL)
+        .post("/api/tokens", { identity: "admin@example.com", secret: "secretpw" })
+        .reply(200, { expires: "2026-09-14T00:00:00.000Z" }, {
+          "set-cookie": ["__Host-Http-token=npmplus-cookie-value; Path=/; HttpOnly; Secure"],
+        });
+
+      nock(BASE_URL)
+        .get("/api/nginx/proxy-hosts")
+        .query({ expand: "owner,access_list,certificate" })
+        .matchHeader("Cookie", "__Host-Http-token=npmplus-cookie-value")
+        .reply(200, hosts);
+
+      const action = findAction("list_proxy_hosts");
+      const instance = makeInstance();
+      const result = await action.handler({}, instance);
+
+      expect(result).toEqual(hosts);
+    });
+
+    it("throws a clear error when login returns neither a body token nor the cookie", async () => {
+      nock(BASE_URL)
+        .post("/api/tokens", { identity: "admin@example.com", secret: "secretpw" })
+        .reply(200, { expires: "2026-09-14T00:00:00.000Z" });
+
+      const action = findAction("list_proxy_hosts");
+      const instance = makeInstance();
+
+      await expect(action.handler({}, instance)).rejects.toThrow(/no token/i);
+    });
+
+    it("falls back to the unexpanded list when this NPMPlus build 500s on the expand param", async () => {
+      const hosts = [{ id: 1, domain_names: ["example.com"], forward_host: "10.0.0.10", forward_port: 8080 }];
+
+      nock(BASE_URL).post("/api/tokens").twice().reply(200, { token: "jwt-token-fallback" });
+
+      nock(BASE_URL)
+        .get("/api/nginx/proxy-hosts")
+        .query({ expand: "owner,access_list,certificate" })
+        .matchHeader("Authorization", "Bearer jwt-token-fallback")
+        .reply(500, { error: { code: 500, message: "Internal Error" } });
+
+      nock(BASE_URL)
+        .get("/api/nginx/proxy-hosts")
+        .matchHeader("Authorization", "Bearer jwt-token-fallback")
+        .reply(200, hosts);
+
+      const action = findAction("list_proxy_hosts");
+      const instance = makeInstance();
+      const result = await action.handler({}, instance);
+
+      expect(result).toEqual(hosts);
+    });
   });
 
   describe("create_proxy_host", () => {

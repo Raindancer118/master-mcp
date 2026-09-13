@@ -22,9 +22,27 @@ function extractErrorMessage(data: unknown): string | undefined {
   return undefined;
 }
 
-/** Logs in fresh against the NPM/NPMPlus API and returns a bearer token. No caching - this is
- * an admin tool used occasionally, not a high-throughput client, and tokens are short-lived. */
-async function getToken(instance: InstanceConfig): Promise<string> {
+/** Extracts the value of one cookie from a Set-Cookie response header list, ignoring
+ * attributes (Path, Secure, HttpOnly, ...). Returns "name=value" suitable for a Cookie header. */
+function extractSetCookie(setCookieHeaders: string[] | undefined, cookieName: string): string | undefined {
+  if (!setCookieHeaders) return undefined;
+  for (const header of setCookieHeaders) {
+    const pair = header.split(";", 1)[0] ?? "";
+    const name = pair.split("=", 1)[0];
+    if (name === cookieName) return pair;
+  }
+  return undefined;
+}
+
+/** Logs in fresh against the NPM/NPMPlus API and returns the auth header to use for
+ * subsequent requests. No caching - this is an admin tool used occasionally, not a
+ * high-throughput client, and tokens are short-lived.
+ *
+ * Upstream NPM (jc21) returns the token in the response body -> Authorization: Bearer.
+ * The NPMPlus fork (zoeyvid) instead sets it as an HttpOnly `__Host-Http-token` cookie
+ * and rejects Bearer auth entirely -> Cookie header. Both are tried so one module covers
+ * both forks. */
+async function getAuthHeader(instance: InstanceConfig): Promise<Record<string, string>> {
   const client = makeHttpClient(`${baseUrlOf(instance)}/api`, { insecureTls: insecureTlsOf(instance) });
   const res = await client.post("/tokens", {
     identity: instance.fields.identity,
@@ -36,10 +54,15 @@ async function getToken(instance: InstanceConfig): Promise<string> {
   }
   assertOk(res.status, res.data, "Nginx Proxy Manager login");
   const token = (res.data as { token?: string }).token;
-  if (!token) {
-    throw new Error("Nginx Proxy Manager login succeeded but no token was returned");
+  if (token) {
+    return { Authorization: `Bearer ${token}` };
   }
-  return token;
+  const setCookie = res.headers["set-cookie"] as string[] | undefined;
+  const cookie = extractSetCookie(setCookie, "__Host-Http-token");
+  if (cookie) {
+    return { Cookie: cookie };
+  }
+  throw new Error("Nginx Proxy Manager login succeeded but no token (body or __Host-Http-token cookie) was returned");
 }
 
 async function npmRequest(
@@ -48,10 +71,10 @@ async function npmRequest(
   path: string,
   opts: { data?: unknown; params?: Record<string, unknown> } = {}
 ): Promise<unknown> {
-  const token = await getToken(instance);
+  const authHeader = await getAuthHeader(instance);
   const client = makeHttpClient(`${baseUrlOf(instance)}/api`, {
     insecureTls: insecureTlsOf(instance),
-    headers: { Authorization: `Bearer ${token}` },
+    headers: authHeader,
   });
   const res = await client.request({ method, url: path, data: opts.data, params: opts.params });
   const message = extractErrorMessage(res.data);
@@ -117,12 +140,24 @@ function proxyHostToNpmBody(params: {
 
 const listProxyHostsAction: ActionDef<Record<string, never>, unknown> = {
   id: "list_proxy_hosts",
-  summary: "List all Nginx Proxy Manager / NPMPlus proxy hosts, with owner/access-list/certificate details",
+  summary: "List all Nginx Proxy Manager / NPMPlus proxy hosts, with owner/access-list/certificate details when supported",
   paramsSchema: z.object({}),
   readOnly: true,
   destructive: false,
-  handler: async (_params, instance) =>
-    npmRequest(instance, "get", "/nginx/proxy-hosts", { params: { expand: "owner,access_list,certificate" } }),
+  handler: async (_params, instance) => {
+    try {
+      return await npmRequest(instance, "get", "/nginx/proxy-hosts", {
+        params: { expand: "owner,access_list,certificate" },
+      });
+    } catch (err) {
+      // Some NPMPlus builds 500 on the `expand` query param (server-side bug, confirmed against
+      // a real instance). Fall back to the unexpanded list rather than losing the whole call.
+      if (err instanceof Error && /Internal Error/i.test(err.message)) {
+        return npmRequest(instance, "get", "/nginx/proxy-hosts");
+      }
+      throw err;
+    }
+  },
 };
 
 const createProxyHostParams = z.object({
