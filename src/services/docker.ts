@@ -70,6 +70,46 @@ function demuxLogs(buffer: Buffer): string {
   return buffer.toString("utf8");
 }
 
+/**
+ * Computes CPU usage percentage from a raw dockerode ContainerStats, using the standard
+ * Docker CLI formula: delta of total CPU usage over delta of system CPU usage, scaled by
+ * the number of online CPUs.
+ */
+function computeCpuPercent(stats: Docker.ContainerStats): number {
+  const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
+  const systemDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
+  const onlineCpus = stats.cpu_stats.online_cpus || stats.cpu_stats.cpu_usage.percpu_usage?.length || 1;
+  if (systemDelta <= 0 || cpuDelta <= 0) return 0;
+  return (cpuDelta / systemDelta) * onlineCpus * 100;
+}
+
+/** Trims a raw dockerode ContainerStats snapshot down to the numbers worth showing an LLM. */
+function trimStats(stats: Docker.ContainerStats) {
+  let rxBytes = 0;
+  let txBytes = 0;
+  for (const iface of Object.values(stats.networks ?? {})) {
+    rxBytes += iface.rx_bytes;
+    txBytes += iface.tx_bytes;
+  }
+  return {
+    cpuPercent: Math.round(computeCpuPercent(stats) * 100) / 100,
+    memoryUsage: stats.memory_stats.usage,
+    memoryLimit: stats.memory_stats.limit,
+    networkRxBytes: rxBytes,
+    networkTxBytes: txBytes,
+  };
+}
+
+/** Maps a "containerPort/proto":"hostPort" record into dockerode's PortBindings shape. */
+function toPortBindings(ports: Record<string, string> | undefined): Docker.PortMap | undefined {
+  if (!ports) return undefined;
+  const bindings: Docker.PortMap = {};
+  for (const [containerPort, hostPort] of Object.entries(ports)) {
+    bindings[containerPort] = [{ HostPort: hostPort }];
+  }
+  return bindings;
+}
+
 /** Pulls an image and resolves once the pull completes (or rejects on error), via followProgress. */
 async function pullAndAwait(docker: Docker, ref: string): Promise<void> {
   const stream = await docker.pull(ref);
@@ -116,6 +156,56 @@ const pullImageParams = z.object({
 });
 
 const emptyParams = z.object({});
+
+const renameContainerParams = z.object({
+  containerId: z.string().min(1),
+  newName: z.string().min(1),
+});
+
+const createContainerParams = z.object({
+  image: z.string().min(1),
+  name: z.string().min(1).optional(),
+  env: z.array(z.string()).optional(),
+  ports: z.record(z.string(), z.string()).optional(),
+  volumes: z.array(z.string()).optional(),
+  command: z.array(z.string()).optional(),
+  restartPolicy: z.enum(["no", "always", "on-failure", "unless-stopped"]).optional(),
+  start: z.boolean().optional(),
+});
+
+const removeImageParams = z.object({
+  image: z.string().min(1),
+  force: z.boolean().optional(),
+});
+
+const tagImageParams = z.object({
+  image: z.string().min(1),
+  repo: z.string().min(1),
+  tag: z.string().min(1).optional(),
+});
+
+const pruneImagesParams = z.object({
+  dangling: z.boolean().optional(),
+});
+
+const createNetworkParams = z.object({
+  name: z.string().min(1),
+  driver: z.string().min(1).optional(),
+});
+
+const networkIdParams = z.object({
+  networkId: z.string().min(1),
+});
+
+const createVolumeParams = z.object({
+  name: z.string().min(1),
+  driver: z.string().min(1).optional(),
+});
+
+const removeVolumeParams = z.object({
+  name: z.string().min(1),
+  force: z.boolean().optional(),
+});
 
 function buildActions(): AnyActionDef[] {
   const listContainers: ActionDef<z.infer<typeof listContainersParams>> = {
@@ -295,6 +385,183 @@ function buildActions(): AnyActionDef[] {
     },
   };
 
+  const renameContainer: ActionDef<z.infer<typeof renameContainerParams>> = {
+    id: "rename_container",
+    summary: "Rename a Docker container.",
+    paramsSchema: renameContainerParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      await docker.getContainer(params.containerId).rename({ name: params.newName });
+      return { success: true, containerId: params.containerId, newName: params.newName };
+    },
+  };
+
+  const containerStats: ActionDef<z.infer<typeof containerIdParams>> = {
+    id: "container_stats",
+    summary: "Get a point-in-time resource usage snapshot (CPU %, memory, network I/O) for a Docker container.",
+    paramsSchema: containerIdParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      const stats = await docker.getContainer(params.containerId).stats({ stream: false });
+      return trimStats(stats);
+    },
+  };
+
+  const containerProcesses: ActionDef<z.infer<typeof containerIdParams>> = {
+    id: "container_processes",
+    summary: "List the processes currently running inside a Docker container (like `docker top`).",
+    paramsSchema: containerIdParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      return docker.getContainer(params.containerId).top();
+    },
+  };
+
+  const createContainer: ActionDef<z.infer<typeof createContainerParams>> = {
+    id: "create_container",
+    summary: "Create a new Docker container from an image, optionally starting it immediately (default: true).",
+    paramsSchema: createContainerParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      const container = await docker.createContainer({
+        Image: params.image,
+        name: params.name,
+        Env: params.env,
+        Cmd: params.command,
+        HostConfig: {
+          PortBindings: toPortBindings(params.ports),
+          Binds: params.volumes,
+          RestartPolicy: { Name: params.restartPolicy ?? "no" },
+        },
+      });
+      if (params.start ?? true) {
+        await container.start();
+      }
+      return { success: true, containerId: container.id, name: params.name };
+    },
+  };
+
+  const pruneContainers: ActionDef<z.infer<typeof emptyParams>> = {
+    id: "prune_containers",
+    summary: "Remove all stopped Docker containers. Irreversible.",
+    paramsSchema: emptyParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (_params, instance) => {
+      const docker = clientFor(instance);
+      return docker.pruneContainers();
+    },
+  };
+
+  const removeImage: ActionDef<z.infer<typeof removeImageParams>> = {
+    id: "remove_image",
+    summary: "Remove a Docker image, optionally forcing removal. Irreversible.",
+    paramsSchema: removeImageParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      await docker.getImage(params.image).remove({ force: params.force });
+      return { success: true, image: params.image };
+    },
+  };
+
+  const tagImage: ActionDef<z.infer<typeof tagImageParams>> = {
+    id: "tag_image",
+    summary: "Apply a new repo:tag to an existing Docker image.",
+    paramsSchema: tagImageParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      await docker.getImage(params.image).tag({ repo: params.repo, tag: params.tag ?? "latest" });
+      return { success: true, image: params.image, repo: params.repo, tag: params.tag ?? "latest" };
+    },
+  };
+
+  const pruneImages: ActionDef<z.infer<typeof pruneImagesParams>> = {
+    id: "prune_images",
+    summary: "Remove unused Docker images (dangling only by default). Irreversible.",
+    paramsSchema: pruneImagesParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      return docker.pruneImages({ filters: { dangling: [String(params.dangling ?? true)] } });
+    },
+  };
+
+  const createNetwork: ActionDef<z.infer<typeof createNetworkParams>> = {
+    id: "create_network",
+    summary: "Create a Docker network (default driver: bridge).",
+    paramsSchema: createNetworkParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      const network = await docker.createNetwork({ Name: params.name, Driver: params.driver ?? "bridge" });
+      return { success: true, name: params.name, id: network.id };
+    },
+  };
+
+  const removeNetwork: ActionDef<z.infer<typeof networkIdParams>> = {
+    id: "remove_network",
+    summary: "Remove a Docker network. Irreversible.",
+    paramsSchema: networkIdParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      await docker.getNetwork(params.networkId).remove();
+      return { success: true, networkId: params.networkId };
+    },
+  };
+
+  const createVolume: ActionDef<z.infer<typeof createVolumeParams>> = {
+    id: "create_volume",
+    summary: "Create a Docker volume (default driver: local).",
+    paramsSchema: createVolumeParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      return docker.createVolume({ Name: params.name, Driver: params.driver ?? "local" });
+    },
+  };
+
+  const removeVolume: ActionDef<z.infer<typeof removeVolumeParams>> = {
+    id: "remove_volume",
+    summary: "Remove a Docker volume, optionally forcing removal. Irreversible.",
+    paramsSchema: removeVolumeParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const docker = clientFor(instance);
+      await docker.getVolume(params.name).remove({ force: params.force });
+      return { success: true, name: params.name };
+    },
+  };
+
+  const pruneVolumes: ActionDef<z.infer<typeof emptyParams>> = {
+    id: "prune_volumes",
+    summary: "Remove all unused Docker volumes. Irreversible.",
+    paramsSchema: emptyParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (_params, instance) => {
+      const docker = clientFor(instance);
+      return docker.pruneVolumes();
+    },
+  };
+
   return [
     listContainers,
     inspectContainer,
@@ -303,10 +570,23 @@ function buildActions(): AnyActionDef[] {
     restartContainer,
     removeContainer,
     containerLogs,
+    renameContainer,
+    containerStats,
+    containerProcesses,
+    createContainer,
+    pruneContainers,
     listImages,
     pullImage,
+    removeImage,
+    tagImage,
+    pruneImages,
     listVolumes,
+    createVolume,
+    removeVolume,
+    pruneVolumes,
     listNetworks,
+    createNetwork,
+    removeNetwork,
     dockerInfo,
   ];
 }

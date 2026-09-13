@@ -174,6 +174,87 @@ const getSslBundleAction: ActionDef<z.infer<typeof getSslBundleParams>, PorkbunR
   handler: async (params, instance) => porkbunPost(instance, `/ssl/retrieve/${params.domain}`),
 };
 
+const getUrlForwardingParams = z.object({
+  domain: z.string(),
+});
+
+const getUrlForwardingAction: ActionDef<z.infer<typeof getUrlForwardingParams>, PorkbunResponse> = {
+  id: "get_url_forwarding",
+  summary: "List existing URL forwards configured for a domain",
+  paramsSchema: getUrlForwardingParams,
+  readOnly: true,
+  destructive: false,
+  handler: async (params, instance) => porkbunPost(instance, `/domain/getUrlForwarding/${params.domain}`),
+};
+
+const addUrlForwardingParams = z.object({
+  domain: z.string(),
+  subdomain: z.string().optional(),
+  location: z.string(),
+  type: z.enum(["temporary", "permanent"]).optional(),
+  includePath: z.enum(["yes", "no"]).optional(),
+  wildcard: z.enum(["yes", "no"]).optional(),
+});
+
+const addUrlForwardingAction: ActionDef<z.infer<typeof addUrlForwardingParams>, PorkbunResponse> = {
+  id: "add_url_forwarding",
+  summary: "Add a URL forward for a domain or subdomain to a destination location",
+  paramsSchema: addUrlForwardingParams,
+  readOnly: false,
+  destructive: false,
+  handler: async (params, instance) =>
+    porkbunPost(
+      instance,
+      `/domain/addUrlForward/${params.domain}`,
+      pruneUndefined({
+        subdomain: params.subdomain,
+        location: params.location,
+        type: params.type ?? "temporary",
+        includePath: params.includePath ?? "no",
+        wildcard: params.wildcard ?? "no",
+      })
+    ),
+};
+
+const deleteUrlForwardingParams = z.object({
+  domain: z.string(),
+  recordId: z.string(),
+});
+
+const deleteUrlForwardingAction: ActionDef<z.infer<typeof deleteUrlForwardingParams>, PorkbunResponse> = {
+  id: "delete_url_forwarding",
+  summary: "Delete a URL forward by record id - irreversible",
+  paramsSchema: deleteUrlForwardingParams,
+  readOnly: false,
+  destructive: true,
+  handler: async (params, instance) =>
+    porkbunPost(instance, `/domain/deleteUrlForward/${params.domain}/${params.recordId}`),
+};
+
+const getNameserversParams = z.object({
+  domain: z.string(),
+});
+
+const getNameserversAction: ActionDef<z.infer<typeof getNameserversParams>, PorkbunResponse> = {
+  id: "get_nameservers",
+  summary: "Retrieve the current authoritative nameservers for a domain",
+  paramsSchema: getNameserversParams,
+  readOnly: true,
+  destructive: false,
+  handler: async (params, instance) => porkbunPost(instance, `/domain/getNs/${params.domain}`),
+};
+
+const checkDomainPricingAction: ActionDef<Record<string, never>, PorkbunResponse> = {
+  id: "check_domain_pricing",
+  summary: "Retrieve Porkbun's default TLD pricing list (registration, renewal, transfer)",
+  paramsSchema: z.object({}),
+  readOnly: true,
+  destructive: false,
+  // Note: Porkbun's /pricing/get endpoint does not require authentication per their docs,
+  // but we still send apikey/secretapikey via the shared porkbunPost helper for consistency.
+  handler: async (_params, instance) => porkbunPost(instance, "/pricing/get"),
+};
+
 const porkbunService: ServiceModule = {
   id: "porkbun",
   label: "Porkbun",
@@ -193,6 +274,11 @@ const porkbunService: ServiceModule = {
     deleteDnsRecordAction,
     updateNameserversAction,
     getSslBundleAction,
+    getUrlForwardingAction,
+    addUrlForwardingAction,
+    deleteUrlForwardingAction,
+    getNameserversAction,
+    checkDomainPricingAction,
   ],
 };
 

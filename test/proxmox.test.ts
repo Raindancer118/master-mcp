@@ -165,6 +165,216 @@ describe("proxmox service", () => {
     });
   });
 
+  describe("get_guest_config", () => {
+    it("gets qemu config", async () => {
+      const config = { cores: 4, memory: 4096, name: "vm100" };
+      nock(BASE_URL).get("/api2/json/nodes/pve1/qemu/100/config").reply(200, { data: config });
+
+      const action = findAction("get_guest_config");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({ node: "pve1", vmid: 100, type: "qemu" }, instance);
+
+      expect(result).toEqual(config);
+    });
+  });
+
+  describe("update_guest_config", () => {
+    it("PUTs only the provided fields", async () => {
+      const scope = nock(BASE_URL)
+        .put("/api2/json/nodes/pve1/qemu/100/config", { cores: 2, memory: 2048 })
+        .reply(200, { data: null });
+
+      const action = findAction("update_guest_config");
+      const instance = makeInstance(validFields);
+      const result = await action.handler(
+        { node: "pve1", vmid: 100, type: "qemu", cores: 2, memory: 2048 },
+        instance
+      );
+
+      expect(result).toBeNull();
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it("PUTs only description when only description is given, for an lxc guest", async () => {
+      const scope = nock(BASE_URL)
+        .put("/api2/json/nodes/pve1/lxc/101/config", { description: "test container" })
+        .reply(200, { data: null });
+
+      const action = findAction("update_guest_config");
+      const instance = makeInstance(validFields);
+      await action.handler(
+        { node: "pve1", vmid: 101, type: "lxc", description: "test container" },
+        instance
+      );
+
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("list_snapshots", () => {
+    it("lists snapshots of a guest", async () => {
+      const snaps = [{ name: "current" }, { name: "before-upgrade" }];
+      nock(BASE_URL).get("/api2/json/nodes/pve1/qemu/100/snapshot").reply(200, { data: snaps });
+
+      const action = findAction("list_snapshots");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({ node: "pve1", vmid: 100, type: "qemu" }, instance);
+
+      expect(result).toEqual(snaps);
+    });
+  });
+
+  describe("create_snapshot", () => {
+    it("posts snapname and description", async () => {
+      const upid = "UPID:pve1:snap:100:";
+      const scope = nock(BASE_URL)
+        .post("/api2/json/nodes/pve1/qemu/100/snapshot", { snapname: "before-upgrade", description: "safety" })
+        .reply(200, { data: upid });
+
+      const action = findAction("create_snapshot");
+      const instance = makeInstance(validFields);
+      const result = await action.handler(
+        { node: "pve1", vmid: 100, type: "qemu", snapname: "before-upgrade", description: "safety" },
+        instance
+      );
+
+      expect(result).toEqual({ upid });
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("delete_snapshot", () => {
+    it("deletes the named snapshot", async () => {
+      const upid = "UPID:pve1:delsnap:100:";
+      const scope = nock(BASE_URL)
+        .delete("/api2/json/nodes/pve1/lxc/101/snapshot/before-upgrade")
+        .reply(200, { data: upid });
+
+      const action = findAction("delete_snapshot");
+      const instance = makeInstance(validFields);
+      const result = await action.handler(
+        { node: "pve1", vmid: 101, type: "lxc", snapname: "before-upgrade" },
+        instance
+      );
+
+      expect(result).toEqual({ upid });
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("rollback_snapshot", () => {
+    it("posts to the rollback path", async () => {
+      const upid = "UPID:pve1:rollback:100:";
+      const scope = nock(BASE_URL)
+        .post("/api2/json/nodes/pve1/qemu/100/snapshot/before-upgrade/rollback")
+        .reply(200, { data: upid });
+
+      const action = findAction("rollback_snapshot");
+      const instance = makeInstance(validFields);
+      const result = await action.handler(
+        { node: "pve1", vmid: 100, type: "qemu", snapname: "before-upgrade" },
+        instance
+      );
+
+      expect(result).toEqual({ upid });
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("list_backups", () => {
+    it("queries the given storage directly when storage is provided", async () => {
+      const backups = [{ volid: "local:backup/vzdump-qemu-100.vma.zst" }];
+      const scope = nock(BASE_URL)
+        .get("/api2/json/nodes/pve1/storage/local/content")
+        .query({ content: "backup" })
+        .reply(200, { data: backups });
+
+      const action = findAction("list_backups");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({ node: "pve1", storage: "local" }, instance);
+
+      expect(result).toEqual(backups);
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it("aggregates backups across all storages supporting the backup content type", async () => {
+      nock(BASE_URL)
+        .get("/api2/json/nodes/pve1/storage")
+        .reply(200, {
+          data: [
+            { storage: "local", content: "backup,iso" },
+            { storage: "nfs-images", content: "images" },
+          ],
+        });
+      nock(BASE_URL)
+        .get("/api2/json/nodes/pve1/storage/local/content")
+        .query({ content: "backup" })
+        .reply(200, { data: [{ volid: "local:backup/vzdump-qemu-100.vma.zst" }] });
+
+      const action = findAction("list_backups");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({ node: "pve1" }, instance);
+
+      expect(result).toEqual([{ volid: "local:backup/vzdump-qemu-100.vma.zst", storage: "local" }]);
+    });
+  });
+
+  describe("get_node_status", () => {
+    it("gets node status", async () => {
+      const status = { uptime: 123456, loadavg: ["0.1", "0.2", "0.3"] };
+      nock(BASE_URL).get("/api2/json/nodes/pve1/status").reply(200, { data: status });
+
+      const action = findAction("get_node_status");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({ node: "pve1" }, instance);
+
+      expect(result).toEqual(status);
+    });
+  });
+
+  describe("list_users", () => {
+    it("lists access-control users", async () => {
+      const users = [{ userid: "root@pam" }];
+      nock(BASE_URL).get("/api2/json/access/users").reply(200, { data: users });
+
+      const action = findAction("list_users");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({}, instance);
+
+      expect(result).toEqual(users);
+    });
+  });
+
+  describe("get_task_status", () => {
+    it("gets task status by upid", async () => {
+      const upid = "UPID:pve1:00001234:00ABCDEF:12345678:qmstart:100:root@pam!mcp:";
+      const status = { status: "stopped", exitstatus: "OK" };
+      nock(BASE_URL)
+        .get(`/api2/json/nodes/pve1/tasks/${encodeURIComponent(upid)}/status`)
+        .reply(200, { data: status });
+
+      const action = findAction("get_task_status");
+      const instance = makeInstance(validFields);
+      const result = await action.handler({ node: "pve1", upid }, instance);
+
+      expect(result).toEqual(status);
+    });
+
+    it("throws a descriptive error on non-2xx status", async () => {
+      const upid = "UPID:pve1:bad:";
+      nock(BASE_URL)
+        .get(`/api2/json/nodes/pve1/tasks/${encodeURIComponent(upid)}/status`)
+        .reply(404, { data: null, errors: { upid: "no such task" } });
+
+      const action = findAction("get_task_status");
+      const instance = makeInstance(validFields);
+
+      await expect(action.handler({ node: "pve1", upid }, instance)).rejects.toThrow(
+        /get_task_status failed with HTTP 404.*no such task/s
+      );
+    });
+  });
+
   describe("error handling", () => {
     it("throws a descriptive error including the response body on non-2xx status", async () => {
       nock(BASE_URL)

@@ -15,6 +15,9 @@ const containerRestart = vi.fn();
 const containerRemove = vi.fn();
 const containerLogs = vi.fn();
 const containerInspect = vi.fn();
+const containerRename = vi.fn();
+const containerStats = vi.fn();
+const containerTop = vi.fn();
 const getContainer = vi.fn(() => ({
   start: containerStart,
   stop: containerStop,
@@ -22,7 +25,24 @@ const getContainer = vi.fn(() => ({
   remove: containerRemove,
   logs: containerLogs,
   inspect: containerInspect,
+  rename: containerRename,
+  stats: containerStats,
+  top: containerTop,
 }));
+
+const createContainerMock = vi.fn();
+const pruneContainersMock = vi.fn();
+const imageRemove = vi.fn();
+const imageTag = vi.fn();
+const getImageMock = vi.fn(() => ({ remove: imageRemove, tag: imageTag }));
+const pruneImagesMock = vi.fn();
+const createNetworkMock = vi.fn();
+const networkRemove = vi.fn();
+const getNetworkMock = vi.fn(() => ({ remove: networkRemove }));
+const createVolumeMock = vi.fn();
+const volumeRemove = vi.fn();
+const getVolumeMock = vi.fn(() => ({ remove: volumeRemove }));
+const pruneVolumesMock = vi.fn();
 
 vi.mock("dockerode", () => {
   return {
@@ -34,6 +54,15 @@ vi.mock("dockerode", () => {
       info: infoMock,
       pull: pullMock,
       getContainer,
+      createContainer: createContainerMock,
+      pruneContainers: pruneContainersMock,
+      getImage: getImageMock,
+      pruneImages: pruneImagesMock,
+      createNetwork: createNetworkMock,
+      getNetwork: getNetworkMock,
+      createVolume: createVolumeMock,
+      getVolume: getVolumeMock,
+      pruneVolumes: pruneVolumesMock,
       modem: { followProgress },
     })),
   };
@@ -295,6 +324,222 @@ describe("docker service", () => {
       await action.handler({ containerId: "abc123", force: true, removeVolumes: true }, instance);
 
       expect(containerRemove).toHaveBeenCalledWith({ force: true, v: true });
+    });
+  });
+
+  const instance = () => makeInstance({ socketPath: "/var/run/docker.sock" });
+
+  describe("rename_container", () => {
+    it("calls the container's rename method", async () => {
+      containerRename.mockResolvedValue(undefined);
+      const action = findAction("rename_container");
+
+      const result = await action.handler({ containerId: "abc123", newName: "web-2" }, instance());
+
+      expect(containerRename).toHaveBeenCalledWith({ name: "web-2" });
+      expect(result).toEqual({ success: true, containerId: "abc123", newName: "web-2" });
+    });
+  });
+
+  describe("container_stats", () => {
+    it("computes cpu percent and trims the raw stats snapshot", async () => {
+      containerStats.mockResolvedValue({
+        cpu_stats: {
+          cpu_usage: { total_usage: 2_000_000_000, percpu_usage: [1, 2] },
+          system_cpu_usage: 10_000_000_000,
+          online_cpus: 2,
+        },
+        precpu_stats: {
+          cpu_usage: { total_usage: 1_000_000_000 },
+          system_cpu_usage: 8_000_000_000,
+        },
+        memory_stats: { usage: 104_857_600, limit: 1_073_741_824 },
+        networks: {
+          eth0: { rx_bytes: 1000, tx_bytes: 500 },
+          eth1: { rx_bytes: 200, tx_bytes: 100 },
+        },
+      });
+
+      const action = findAction("container_stats");
+      const result = await action.handler({ containerId: "abc123" }, instance());
+
+      // cpuDelta=1e9, systemDelta=2e9 -> (1e9/2e9)*2*100 = 100
+      expect(result).toEqual({
+        cpuPercent: 100,
+        memoryUsage: 104_857_600,
+        memoryLimit: 1_073_741_824,
+        networkRxBytes: 1200,
+        networkTxBytes: 600,
+      });
+    });
+  });
+
+  describe("container_processes", () => {
+    it("returns the container's top output", async () => {
+      const topResult = { Titles: ["PID", "CMD"], Processes: [["1", "nginx"]] };
+      containerTop.mockResolvedValue(topResult);
+
+      const action = findAction("container_processes");
+      const result = await action.handler({ containerId: "abc123" }, instance());
+
+      expect(containerTop).toHaveBeenCalled();
+      expect(result).toEqual(topResult);
+    });
+  });
+
+  describe("create_container", () => {
+    it("creates the container with mapped host config and starts it by default", async () => {
+      createContainerMock.mockResolvedValue({ id: "newid123", start: containerStart });
+      containerStart.mockResolvedValue(undefined);
+
+      const action = findAction("create_container");
+      const result = await action.handler(
+        {
+          image: "nginx:latest",
+          name: "web",
+          env: ["FOO=bar"],
+          ports: { "80/tcp": "8080" },
+          volumes: ["/host:/container"],
+          command: ["nginx", "-g", "daemon off;"],
+          restartPolicy: "always",
+        },
+        instance()
+      );
+
+      expect(createContainerMock).toHaveBeenCalledWith({
+        Image: "nginx:latest",
+        name: "web",
+        Env: ["FOO=bar"],
+        Cmd: ["nginx", "-g", "daemon off;"],
+        HostConfig: {
+          PortBindings: { "80/tcp": [{ HostPort: "8080" }] },
+          Binds: ["/host:/container"],
+          RestartPolicy: { Name: "always" },
+        },
+      });
+      expect(containerStart).toHaveBeenCalled();
+      expect(result).toEqual({ success: true, containerId: "newid123", name: "web" });
+    });
+
+    it("does not start the container when start:false", async () => {
+      createContainerMock.mockResolvedValue({ id: "newid456", start: containerStart });
+
+      const action = findAction("create_container");
+      await action.handler({ image: "redis:latest", start: false }, instance());
+
+      expect(containerStart).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("prune_containers", () => {
+    it("calls pruneContainers and returns its result", async () => {
+      const pruneResult = { ContainersDeleted: ["a", "b"], SpaceReclaimed: 1024 };
+      pruneContainersMock.mockResolvedValue(pruneResult);
+
+      const action = findAction("prune_containers");
+      const result = await action.handler({}, instance());
+
+      expect(result).toEqual(pruneResult);
+    });
+  });
+
+  describe("remove_image", () => {
+    it("removes the image by ref with the force flag", async () => {
+      imageRemove.mockResolvedValue(undefined);
+
+      const action = findAction("remove_image");
+      const result = await action.handler({ image: "nginx:old", force: true }, instance());
+
+      expect(getImageMock).toHaveBeenCalledWith("nginx:old");
+      expect(imageRemove).toHaveBeenCalledWith({ force: true });
+      expect(result).toEqual({ success: true, image: "nginx:old" });
+    });
+  });
+
+  describe("tag_image", () => {
+    it("tags the image, defaulting tag to latest", async () => {
+      imageTag.mockResolvedValue(undefined);
+
+      const action = findAction("tag_image");
+      const result = await action.handler({ image: "nginx:old", repo: "myrepo/nginx" }, instance());
+
+      expect(imageTag).toHaveBeenCalledWith({ repo: "myrepo/nginx", tag: "latest" });
+      expect(result).toEqual({ success: true, image: "nginx:old", repo: "myrepo/nginx", tag: "latest" });
+    });
+  });
+
+  describe("prune_images", () => {
+    it("prunes dangling images by default", async () => {
+      const pruneResult = { ImagesDeleted: [], SpaceReclaimed: 0 };
+      pruneImagesMock.mockResolvedValue(pruneResult);
+
+      const action = findAction("prune_images");
+      const result = await action.handler({}, instance());
+
+      expect(pruneImagesMock).toHaveBeenCalledWith({ filters: { dangling: ["true"] } });
+      expect(result).toEqual(pruneResult);
+    });
+  });
+
+  describe("create_network", () => {
+    it("creates a bridge network by default", async () => {
+      createNetworkMock.mockResolvedValue({ id: "net123" });
+
+      const action = findAction("create_network");
+      const result = await action.handler({ name: "my-net" }, instance());
+
+      expect(createNetworkMock).toHaveBeenCalledWith({ Name: "my-net", Driver: "bridge" });
+      expect(result).toEqual({ success: true, name: "my-net", id: "net123" });
+    });
+  });
+
+  describe("remove_network", () => {
+    it("removes the network by id", async () => {
+      networkRemove.mockResolvedValue(undefined);
+
+      const action = findAction("remove_network");
+      const result = await action.handler({ networkId: "net123" }, instance());
+
+      expect(getNetworkMock).toHaveBeenCalledWith("net123");
+      expect(result).toEqual({ success: true, networkId: "net123" });
+    });
+  });
+
+  describe("create_volume", () => {
+    it("creates a local volume by default", async () => {
+      const volumeResult = { Name: "my-vol", Driver: "local" };
+      createVolumeMock.mockResolvedValue(volumeResult);
+
+      const action = findAction("create_volume");
+      const result = await action.handler({ name: "my-vol" }, instance());
+
+      expect(createVolumeMock).toHaveBeenCalledWith({ Name: "my-vol", Driver: "local" });
+      expect(result).toEqual(volumeResult);
+    });
+  });
+
+  describe("remove_volume", () => {
+    it("removes the volume by name with the force flag", async () => {
+      volumeRemove.mockResolvedValue(undefined);
+
+      const action = findAction("remove_volume");
+      const result = await action.handler({ name: "my-vol", force: true }, instance());
+
+      expect(getVolumeMock).toHaveBeenCalledWith("my-vol");
+      expect(volumeRemove).toHaveBeenCalledWith({ force: true });
+      expect(result).toEqual({ success: true, name: "my-vol" });
+    });
+  });
+
+  describe("prune_volumes", () => {
+    it("calls pruneVolumes and returns its result", async () => {
+      const pruneResult = { VolumesDeleted: ["my-vol"], SpaceReclaimed: 2048 };
+      pruneVolumesMock.mockResolvedValue(pruneResult);
+
+      const action = findAction("prune_volumes");
+      const result = await action.handler({}, instance());
+
+      expect(result).toEqual(pruneResult);
     });
   });
 });

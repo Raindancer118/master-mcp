@@ -246,6 +246,161 @@ const listCertificatesAction: ActionDef<Record<string, never>, unknown> = {
   handler: async (_params, instance) => npmRequest(instance, "get", "/nginx/certificates"),
 };
 
+const listUsersAction: ActionDef<Record<string, never>, unknown> = {
+  id: "list_users",
+  summary: "List all Nginx Proxy Manager / NPMPlus users",
+  paramsSchema: z.object({}),
+  readOnly: true,
+  destructive: false,
+  handler: async (_params, instance) => npmRequest(instance, "get", "/users"),
+};
+
+const createUserParams = z.object({
+  name: z.string(),
+  nickname: z.string(),
+  email: z.string(),
+  password: z.string(),
+  isAdmin: z.boolean().optional(),
+});
+
+const createUserAction: ActionDef<z.infer<typeof createUserParams>, unknown> = {
+  id: "create_user",
+  summary: "Create a new NPM user and set their password (two-step: create user, then set auth)",
+  paramsSchema: createUserParams,
+  readOnly: false,
+  destructive: false,
+  handler: async (params, instance) => {
+    const user = await npmRequest(instance, "post", "/users", {
+      data: {
+        name: params.name,
+        nickname: params.nickname,
+        email: params.email,
+        roles: params.isAdmin ? ["admin"] : [],
+        is_disabled: false,
+      },
+    });
+    const userId = (user as { id?: number })?.id;
+    const auth = await npmRequest(instance, "post", `/users/${userId}/auth`, {
+      data: { type: "password", secret: params.password },
+    });
+    return { user, auth };
+  },
+};
+
+const updateUserParams = z.object({
+  userId: z.number(),
+  name: z.string().optional(),
+  nickname: z.string().optional(),
+  email: z.string().optional(),
+  isAdmin: z.boolean().optional(),
+  isDisabled: z.boolean().optional(),
+});
+
+const updateUserAction: ActionDef<z.infer<typeof updateUserParams>, unknown> = {
+  id: "update_user",
+  summary: "Update an existing NPM user's name, nickname, email, admin role or disabled state (partial update)",
+  paramsSchema: updateUserParams,
+  readOnly: false,
+  destructive: true,
+  handler: async (params, instance) =>
+    npmRequest(instance, "put", `/users/${params.userId}`, {
+      data: pruneUndefined({
+        name: params.name,
+        nickname: params.nickname,
+        email: params.email,
+        roles: params.isAdmin === undefined ? undefined : params.isAdmin ? ["admin"] : [],
+        is_disabled: params.isDisabled,
+      }),
+    }),
+};
+
+const userIdParams = z.object({ userId: z.number() });
+
+const deleteUserAction: ActionDef<z.infer<typeof userIdParams>, unknown> = {
+  id: "delete_user",
+  summary: "Delete an NPM user permanently - irreversible",
+  paramsSchema: userIdParams,
+  readOnly: false,
+  destructive: true,
+  handler: async (params, instance) => npmRequest(instance, "delete", `/users/${params.userId}`),
+};
+
+const listDeadHostsAction: ActionDef<Record<string, never>, unknown> = {
+  id: "list_dead_hosts",
+  summary: "List all configured 404/catch-all (dead) hosts",
+  paramsSchema: z.object({}),
+  readOnly: true,
+  destructive: false,
+  handler: async (_params, instance) => npmRequest(instance, "get", "/nginx/dead-hosts"),
+};
+
+const listSettingsAction: ActionDef<Record<string, never>, unknown> = {
+  id: "list_settings",
+  summary: "List all NPM/NPMPlus application settings",
+  paramsSchema: z.object({}),
+  readOnly: true,
+  destructive: false,
+  handler: async (_params, instance) => npmRequest(instance, "get", "/settings"),
+};
+
+const updateSettingParams = z.object({
+  settingId: z.string(),
+  value: z.unknown(),
+  meta: z.record(z.string(), z.unknown()).optional(),
+});
+
+const updateSettingAction: ActionDef<z.infer<typeof updateSettingParams>, unknown> = {
+  id: "update_setting",
+  summary: "Update an application setting by id (e.g. default-site)",
+  paramsSchema: updateSettingParams,
+  readOnly: false,
+  destructive: true,
+  handler: async (params, instance) =>
+    npmRequest(instance, "put", `/settings/${params.settingId}`, {
+      data: { value: params.value, meta: params.meta ?? {} },
+    }),
+};
+
+const requestLetsencryptCertificateParams = z.object({
+  domainNames: z.array(z.string()),
+  email: z.string(),
+  agreeTos: z.boolean().optional(),
+});
+
+const requestLetsencryptCertificateAction: ActionDef<
+  z.infer<typeof requestLetsencryptCertificateParams>,
+  unknown
+> = {
+  id: "request_letsencrypt_certificate",
+  summary: "Request a new Let's Encrypt SSL certificate for one or more domains",
+  paramsSchema: requestLetsencryptCertificateParams,
+  readOnly: false,
+  destructive: false,
+  handler: async (params, instance) =>
+    npmRequest(instance, "post", "/nginx/certificates", {
+      data: {
+        provider: "letsencrypt",
+        domain_names: params.domainNames,
+        meta: {
+          letsencrypt_email: params.email,
+          letsencrypt_agree: params.agreeTos ?? true,
+          dns_challenge: false,
+        },
+      },
+    }),
+};
+
+const certificateIdParams = z.object({ certificateId: z.number() });
+
+const deleteCertificateAction: ActionDef<z.infer<typeof certificateIdParams>, unknown> = {
+  id: "delete_certificate",
+  summary: "Delete an SSL certificate permanently - irreversible",
+  paramsSchema: certificateIdParams,
+  readOnly: false,
+  destructive: true,
+  handler: async (params, instance) => npmRequest(instance, "delete", `/nginx/certificates/${params.certificateId}`),
+};
+
 const npmService: ServiceModule = {
   id: "npm",
   label: "Nginx Proxy Manager / NPMPlus",
@@ -270,6 +425,15 @@ const npmService: ServiceModule = {
     listStreamsAction,
     listAccessListsAction,
     listCertificatesAction,
+    listUsersAction,
+    createUserAction,
+    updateUserAction,
+    deleteUserAction,
+    listDeadHostsAction,
+    listSettingsAction,
+    updateSettingAction,
+    requestLetsencryptCertificateAction,
+    deleteCertificateAction,
   ],
 };
 

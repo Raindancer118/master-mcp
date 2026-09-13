@@ -131,6 +131,46 @@ const addHttpMonitorParams = z.object({
   resendInterval: z.number().int().nonnegative().optional(),
 });
 
+const editMonitorParams = z.object({
+  monitorId: z.number().int(),
+  name: z.string().min(1).optional(),
+  url: z.string().min(1).optional(),
+  interval: z.number().int().positive().optional(),
+  retryInterval: z.number().int().positive().optional(),
+  resendInterval: z.number().int().nonnegative().optional(),
+  active: z.boolean().optional(),
+});
+
+const addMaintenanceParams = z.object({
+  title: z.string().min(1),
+  description: z.string().optional(),
+  strategy: z.enum(["manual", "single", "recurring-interval"]).optional(),
+  monitorIds: z.array(z.number().int()).optional(),
+});
+
+/**
+ * Logs into `instance`, waits for the pushed "monitorList" event, and returns the raw
+ * (untrimmed) object for `monitorId` from it. Used whenever a full monitor definition is
+ * needed (e.g. to merge partial edits before re-submitting it).
+ */
+async function getRawMonitor(socket: Socket, monitorId: number): Promise<MonitorObject> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('Timed out waiting for "monitorList" from Uptime Kuma after login'));
+    }, MONITOR_LIST_TIMEOUT_MS);
+
+    socket.once("monitorList", (data: Record<string, MonitorObject>) => {
+      clearTimeout(timer);
+      const monitor = data[String(monitorId)];
+      if (!monitor) {
+        reject(new Error(`Monitor ${monitorId} not found`));
+        return;
+      }
+      resolve(monitor);
+    });
+  });
+}
+
 function buildActions(): AnyActionDef[] {
   const listMonitors: ActionDef<z.infer<typeof emptyParams>> = {
     id: "list_monitors",
@@ -244,7 +284,133 @@ function buildActions(): AnyActionDef[] {
     },
   };
 
-  return [listMonitors, getMonitorBeats, pauseMonitor, resumeMonitor, deleteMonitor, addHttpMonitor];
+  const editMonitor: ActionDef<z.infer<typeof editMonitorParams>> = {
+    id: "edit_monitor",
+    summary: "Edit an existing monitor's name, URL, check interval, retry interval, resend interval, or active state.",
+    paramsSchema: editMonitorParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      return withSession(instance, async (socket) => {
+        const current = await getRawMonitor(socket, params.monitorId);
+        const merged: MonitorObject = {
+          ...current,
+          id: params.monitorId,
+          ...(params.name !== undefined ? { name: params.name } : {}),
+          ...(params.url !== undefined ? { url: params.url } : {}),
+          ...(params.interval !== undefined ? { interval: params.interval } : {}),
+          ...(params.retryInterval !== undefined ? { retryInterval: params.retryInterval } : {}),
+          ...(params.resendInterval !== undefined ? { resendInterval: params.resendInterval } : {}),
+          ...(params.active !== undefined ? { active: params.active } : {}),
+        };
+        const res = await emitAck<{ ok: boolean; msg?: string }>(socket, "editMonitor", [{ monitor: merged }]);
+        if (!res.ok) throw new Error(res.msg ?? "edit_monitor failed");
+        return { ok: true };
+      });
+    },
+  };
+
+  const listNotifications: ActionDef<z.infer<typeof emptyParams>> = {
+    id: "list_notifications",
+    summary: "List all configured notification providers (e.g. email, Discord, Telegram) in Uptime Kuma.",
+    paramsSchema: emptyParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (_params, instance) => {
+      return withSession(instance, (socket) => {
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error('Timed out waiting for "notificationList" from Uptime Kuma after login'));
+          }, MONITOR_LIST_TIMEOUT_MS);
+
+          socket.once("notificationList", (data: unknown[]) => {
+            clearTimeout(timer);
+            resolve(data);
+          });
+        });
+      });
+    },
+  };
+
+  const listMaintenance: ActionDef<z.infer<typeof emptyParams>> = {
+    id: "list_maintenance",
+    summary: "List all maintenance windows configured in Uptime Kuma.",
+    paramsSchema: emptyParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (_params, instance) => {
+      return withSession(instance, async (socket) => {
+        const res = await emitAck<{ ok: boolean; msg?: string; maintenanceList?: unknown[] }>(
+          socket,
+          "getMaintenanceList",
+          []
+        );
+        if (!res.ok) throw new Error(res.msg ?? "list_maintenance failed");
+        return res.maintenanceList ?? [];
+      });
+    },
+  };
+
+  const addMaintenance: ActionDef<z.infer<typeof addMaintenanceParams>> = {
+    id: "add_maintenance",
+    summary: "Create a maintenance window, optionally scoped to specific monitors, to suppress alerts during planned downtime.",
+    paramsSchema: addMaintenanceParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      return withSession(instance, async (socket) => {
+        const maintenance = {
+          title: params.title,
+          description: params.description ?? "",
+          strategy: params.strategy ?? "manual",
+          active: true,
+          monitors: (params.monitorIds ?? []).map((id) => ({ id })),
+          dateRange: [],
+          weekdays: [],
+          daysOfMonth: [],
+          timeRange: [{ hours: 0, minutes: 0 }],
+        };
+        const res = await emitAck<{ ok: boolean; msg?: string; maintenanceID?: number }>(socket, "addMaintenance", [
+          maintenance,
+        ]);
+        if (!res.ok) throw new Error(res.msg ?? "add_maintenance failed");
+        return { maintenanceId: res.maintenanceID };
+      });
+    },
+  };
+
+  const listStatusPages: ActionDef<z.infer<typeof emptyParams>> = {
+    id: "list_status_pages",
+    summary: "List all public status pages configured in Uptime Kuma, keyed by slug.",
+    paramsSchema: emptyParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (_params, instance) => {
+      return withSession(instance, async (socket) => {
+        const res = await emitAck<{ ok: boolean; msg?: string; statusPageList?: unknown }>(
+          socket,
+          "getStatusPageList",
+          []
+        );
+        if (!res.ok) throw new Error(res.msg ?? "list_status_pages failed");
+        return res.statusPageList ?? {};
+      });
+    },
+  };
+
+  return [
+    listMonitors,
+    getMonitorBeats,
+    pauseMonitor,
+    resumeMonitor,
+    deleteMonitor,
+    addHttpMonitor,
+    editMonitor,
+    listNotifications,
+    listMaintenance,
+    addMaintenance,
+    listStatusPages,
+  ];
 }
 
 const uptimeKumaService: ServiceModule = {

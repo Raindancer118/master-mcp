@@ -93,4 +93,117 @@ describe("porkbun service", () => {
       expect(scope.isDone()).toBe(true);
     });
   });
+
+  describe("get_url_forwarding", () => {
+    it("returns the list of url forwards on success", async () => {
+      const scope = nock(BASE_URL)
+        .post("/domain/getUrlForwarding/example.com", {
+          apikey: "pk_test",
+          secretapikey: "sk_test",
+        })
+        .reply(200, {
+          status: "SUCCESS",
+          forwards: [{ id: "1", subdomain: "", location: "https://example.org", type: "temporary" }],
+        });
+
+      const action = findAction("get_url_forwarding");
+      const result = (await action.handler({ domain: "example.com" }, makeInstance())) as {
+        forwards: Array<{ location: string }>;
+      };
+
+      expect(result.forwards).toHaveLength(1);
+      expect(result.forwards[0]!.location).toBe("https://example.org");
+      expect(scope.isDone()).toBe(true);
+    });
+
+    it("throws the Porkbun error message on ERROR status", async () => {
+      nock(BASE_URL).post("/domain/getUrlForwarding/example.com").reply(200, {
+        status: "ERROR",
+        message: "Invalid domain.",
+      });
+
+      const action = findAction("get_url_forwarding");
+      await expect(action.handler({ domain: "example.com" }, makeInstance())).rejects.toThrow("Invalid domain.");
+    });
+  });
+
+  describe("add_url_forwarding", () => {
+    it("adds a url forward with defaults applied", async () => {
+      const scope = nock(BASE_URL)
+        .post("/domain/addUrlForward/example.com", {
+          apikey: "pk_test",
+          secretapikey: "sk_test",
+          location: "https://example.org",
+          type: "temporary",
+          includePath: "no",
+          wildcard: "no",
+        })
+        .reply(200, { status: "SUCCESS" });
+
+      const action = findAction("add_url_forwarding");
+      const result = (await action.handler(
+        { domain: "example.com", location: "https://example.org" },
+        makeInstance()
+      )) as { status: string };
+
+      expect(result.status).toBe("SUCCESS");
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("delete_url_forwarding", () => {
+    it("deletes the url forward and returns success", async () => {
+      const scope = nock(BASE_URL)
+        .post("/domain/deleteUrlForward/example.com/99", {
+          apikey: "pk_test",
+          secretapikey: "sk_test",
+        })
+        .reply(200, { status: "SUCCESS" });
+
+      const action = findAction("delete_url_forwarding");
+      const result = (await action.handler(
+        { domain: "example.com", recordId: "99" },
+        makeInstance()
+      )) as { status: string };
+
+      expect(result.status).toBe("SUCCESS");
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("get_nameservers", () => {
+    it("returns the current nameservers on success", async () => {
+      const scope = nock(BASE_URL)
+        .post("/domain/getNs/example.com", {
+          apikey: "pk_test",
+          secretapikey: "sk_test",
+        })
+        .reply(200, { status: "SUCCESS", ns: ["curitiba.ns.porkbun.com", "fortaleza.ns.porkbun.com"] });
+
+      const action = findAction("get_nameservers");
+      const result = (await action.handler({ domain: "example.com" }, makeInstance())) as { ns: string[] };
+
+      expect(result.ns).toEqual(["curitiba.ns.porkbun.com", "fortaleza.ns.porkbun.com"]);
+      expect(scope.isDone()).toBe(true);
+    });
+  });
+
+  describe("check_domain_pricing", () => {
+    it("returns the default TLD pricing list on success", async () => {
+      const scope = nock(BASE_URL)
+        .post("/pricing/get", {
+          apikey: "pk_test",
+          secretapikey: "sk_test",
+        })
+        .reply(200, { status: "SUCCESS", pricing: { com: { registration: "9.68", renewal: "9.68" } } });
+
+      const action = findAction("check_domain_pricing");
+      const result = (await action.handler({}, makeInstance())) as {
+        pricing: Record<string, { registration: string }>;
+      };
+
+      expect(result.pricing.com!.registration).toBe("9.68");
+      expect(scope.isDone()).toBe(true);
+    });
+  });
 });

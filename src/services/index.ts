@@ -5,5 +5,14 @@ import docker from "./docker.js";
 import proxmox from "./proxmox.js";
 import npm from "./npm.js";
 import uptimeKuma from "./uptimeKuma.js";
+import authentik from "./authentik.js";
 
-export const allServiceModules: ServiceModule[] = [cloudflare, porkbun, docker, proxmox, npm, uptimeKuma];
+export const allServiceModules: ServiceModule[] = [
+  cloudflare,
+  porkbun,
+  docker,
+  proxmox,
+  npm,
+  uptimeKuma,
+  authentik,
+];

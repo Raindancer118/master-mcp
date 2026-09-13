@@ -144,4 +144,201 @@ describe("npm service", () => {
       expect(result).toBe(true);
     });
   });
+
+  describe("list_users", () => {
+    it("logs in and returns the users", async () => {
+      const users = [{ id: 1, name: "Admin User", email: "admin@example.com" }];
+
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-users" });
+
+      nock(BASE_URL)
+        .get("/api/users")
+        .matchHeader("Authorization", "Bearer jwt-token-users")
+        .reply(200, users);
+
+      const action = findAction("list_users");
+      const instance = makeInstance();
+      const result = await action.handler({}, instance);
+
+      expect(result).toEqual(users);
+    });
+  });
+
+  describe("create_user", () => {
+    it("creates the user then sets their password auth, returning both results", async () => {
+      nock(BASE_URL).post("/api/tokens").twice().reply(200, { token: "jwt-token-create-user" });
+
+      nock(BASE_URL)
+        .post("/api/users", {
+          name: "Jane Doe",
+          nickname: "jane",
+          email: "jane@example.com",
+          roles: ["admin"],
+          is_disabled: false,
+        })
+        .matchHeader("Authorization", "Bearer jwt-token-create-user")
+        .reply(201, { id: 7, name: "Jane Doe" });
+
+      nock(BASE_URL)
+        .post("/api/users/7/auth", { type: "password", secret: "s3cret!" })
+        .matchHeader("Authorization", "Bearer jwt-token-create-user")
+        .reply(201, { success: true });
+
+      const action = findAction("create_user");
+      const instance = makeInstance();
+      const result = await action.handler(
+        { name: "Jane Doe", nickname: "jane", email: "jane@example.com", password: "s3cret!", isAdmin: true },
+        instance
+      );
+
+      expect(result).toEqual({ user: { id: 7, name: "Jane Doe" }, auth: { success: true } });
+    });
+  });
+
+  describe("update_user", () => {
+    it("puts only the provided fields, mapped to snake_case", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-update-user" });
+
+      nock(BASE_URL)
+        .put("/api/users/7", { nickname: "janed", is_disabled: true })
+        .matchHeader("Authorization", "Bearer jwt-token-update-user")
+        .reply(200, { id: 7, nickname: "janed", is_disabled: true });
+
+      const action = findAction("update_user");
+      const instance = makeInstance();
+      const result = await action.handler({ userId: 7, nickname: "janed", isDisabled: true }, instance);
+
+      expect(result).toEqual({ id: 7, nickname: "janed", is_disabled: true });
+    });
+  });
+
+  describe("delete_user", () => {
+    it("deletes the user by id", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-del-user" });
+
+      nock(BASE_URL)
+        .delete("/api/users/7")
+        .matchHeader("Authorization", "Bearer jwt-token-del-user")
+        .reply(200, true);
+
+      const action = findAction("delete_user");
+      const instance = makeInstance();
+      const result = await action.handler({ userId: 7 }, instance);
+
+      expect(result).toBe(true);
+    });
+
+    it("surfaces the NPM error message on failure", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-del-user-err" });
+
+      nock(BASE_URL)
+        .delete("/api/users/7")
+        .matchHeader("Authorization", "Bearer jwt-token-del-user-err")
+        .reply(403, { error: { code: 403, message: "Cannot delete yourself" } });
+
+      const action = findAction("delete_user");
+      const instance = makeInstance();
+
+      await expect(action.handler({ userId: 7 }, instance)).rejects.toThrow(/Cannot delete yourself/);
+    });
+  });
+
+  describe("list_dead_hosts", () => {
+    it("logs in and returns the dead hosts", async () => {
+      const hosts = [{ id: 3, domain_names: ["404.example.com"] }];
+
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-dead-hosts" });
+
+      nock(BASE_URL)
+        .get("/api/nginx/dead-hosts")
+        .matchHeader("Authorization", "Bearer jwt-token-dead-hosts")
+        .reply(200, hosts);
+
+      const action = findAction("list_dead_hosts");
+      const instance = makeInstance();
+      const result = await action.handler({}, instance);
+
+      expect(result).toEqual(hosts);
+    });
+  });
+
+  describe("list_settings", () => {
+    it("logs in and returns the settings", async () => {
+      const settings = [{ id: "default-site", name: "Default Site", value: "congratulations" }];
+
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-settings" });
+
+      nock(BASE_URL)
+        .get("/api/settings")
+        .matchHeader("Authorization", "Bearer jwt-token-settings")
+        .reply(200, settings);
+
+      const action = findAction("list_settings");
+      const instance = makeInstance();
+      const result = await action.handler({}, instance);
+
+      expect(result).toEqual(settings);
+    });
+  });
+
+  describe("update_setting", () => {
+    it("puts the value and meta for the given setting id", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-update-setting" });
+
+      nock(BASE_URL)
+        .put("/api/settings/default-site", { value: "redirect", meta: { redirect: "https://example.com" } })
+        .matchHeader("Authorization", "Bearer jwt-token-update-setting")
+        .reply(200, { id: "default-site", value: "redirect" });
+
+      const action = findAction("update_setting");
+      const instance = makeInstance();
+      const result = await action.handler(
+        { settingId: "default-site", value: "redirect", meta: { redirect: "https://example.com" } },
+        instance
+      );
+
+      expect(result).toEqual({ id: "default-site", value: "redirect" });
+    });
+  });
+
+  describe("request_letsencrypt_certificate", () => {
+    it("posts the letsencrypt certificate request with defaults", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-cert" });
+
+      nock(BASE_URL)
+        .post("/api/nginx/certificates", {
+          provider: "letsencrypt",
+          domain_names: ["example.com"],
+          meta: { letsencrypt_email: "admin@example.com", letsencrypt_agree: true, dns_challenge: false },
+        })
+        .matchHeader("Authorization", "Bearer jwt-token-cert")
+        .reply(201, { id: 9, domain_names: ["example.com"] });
+
+      const action = findAction("request_letsencrypt_certificate");
+      const instance = makeInstance();
+      const result = await action.handler(
+        { domainNames: ["example.com"], email: "admin@example.com" },
+        instance
+      );
+
+      expect(result).toEqual({ id: 9, domain_names: ["example.com"] });
+    });
+  });
+
+  describe("delete_certificate", () => {
+    it("deletes the certificate by id", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-del-cert" });
+
+      nock(BASE_URL)
+        .delete("/api/nginx/certificates/9")
+        .matchHeader("Authorization", "Bearer jwt-token-del-cert")
+        .reply(200, true);
+
+      const action = findAction("delete_certificate");
+      const instance = makeInstance();
+      const result = await action.handler({ certificateId: 9 }, instance);
+
+      expect(result).toBe(true);
+    });
+  });
 });

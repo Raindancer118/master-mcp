@@ -193,4 +193,184 @@ describe("uptimeKuma service", () => {
       await expect(action.handler({ monitorId: 99 }, makeInstance())).rejects.toThrow("Monitor not found");
     });
   });
+
+  describe("edit_monitor", () => {
+    it("waits for monitorList, merges given fields, and emits editMonitor", async () => {
+      withLoginAck({ ok: true });
+
+      const action = findAction("edit_monitor");
+      const resultPromise = action.handler({ monitorId: 1, name: "Renamed" }, makeInstance());
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const monitorListHandler = lastSocket.once.mock.calls.find((c) => c[0] === "monitorList")?.[1];
+      expect(monitorListHandler).toBeTypeOf("function");
+
+      monitorListHandler!({
+        "1": {
+          id: 1,
+          name: "Example",
+          type: "http",
+          url: "https://example.com",
+          active: true,
+          interval: 60,
+        },
+      });
+
+      // Let getRawMonitor resolve before editMonitor is emitted.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const editCall = lastSocket.emit.mock.calls.find((c) => c[0] === "editMonitor");
+      expect(editCall).toBeDefined();
+      const editCb = editCall![2] as (res: unknown) => void;
+      editCb({ ok: true });
+
+      const result = await resultPromise;
+      expect(result).toEqual({ ok: true });
+      expect(editCall![1]).toEqual({
+        monitor: {
+          id: 1,
+          name: "Renamed",
+          type: "http",
+          url: "https://example.com",
+          active: true,
+          interval: 60,
+        },
+      });
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it("rejects when the monitor is not in monitorList", async () => {
+      withLoginAck({ ok: true });
+
+      const action = findAction("edit_monitor");
+      const resultPromise = action.handler({ monitorId: 5 }, makeInstance());
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const monitorListHandler = lastSocket.once.mock.calls.find((c) => c[0] === "monitorList")?.[1];
+      monitorListHandler!({});
+
+      await expect(resultPromise).rejects.toThrow("Monitor 5 not found");
+    });
+  });
+
+  describe("list_notifications", () => {
+    it("logs in, waits for the notificationList push, and returns it", async () => {
+      withLoginAck({ ok: true });
+
+      const action = findAction("list_notifications");
+      const resultPromise = action.handler({}, makeInstance());
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(lastSocket.once).toHaveBeenCalledWith("notificationList", expect.any(Function));
+      const handler = lastSocket.once.mock.calls.find((c) => c[0] === "notificationList")?.[1];
+      handler!([{ id: 1, config: "{}", name: "email" }]);
+
+      const result = await resultPromise;
+      expect(result).toEqual([{ id: 1, config: "{}", name: "email" }]);
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("list_maintenance", () => {
+    it("emits getMaintenanceList and returns the maintenanceList", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "getMaintenanceList") cb({ ok: true, maintenanceList: [{ id: 1, title: "Window" }] });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const action = findAction("list_maintenance");
+      const result = await action.handler({}, makeInstance());
+
+      expect(result).toEqual([{ id: 1, title: "Window" }]);
+      expect(lastSocket.emit).toHaveBeenCalledWith("getMaintenanceList", expect.any(Function));
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it("rejects with the server's message when the request fails", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "getMaintenanceList") cb({ ok: false, msg: "not allowed" });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const action = findAction("list_maintenance");
+      await expect(action.handler({}, makeInstance())).rejects.toThrow("not allowed");
+    });
+  });
+
+  describe("add_maintenance", () => {
+    it("emits addMaintenance with default strategy and monitor mapping", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "addMaintenance") cb({ ok: true, maintenanceID: 7 });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const action = findAction("add_maintenance");
+      const result = await action.handler({ title: "Upgrade", monitorIds: [1, 2] }, makeInstance());
+
+      expect(result).toEqual({ maintenanceId: 7 });
+      expect(lastSocket.emit).toHaveBeenCalledWith(
+        "addMaintenance",
+        {
+          title: "Upgrade",
+          description: "",
+          strategy: "manual",
+          active: true,
+          monitors: [{ id: 1 }, { id: 2 }],
+          dateRange: [],
+          weekdays: [],
+          daysOfMonth: [],
+          timeRange: [{ hours: 0, minutes: 0 }],
+        },
+        expect.any(Function)
+      );
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("list_status_pages", () => {
+    it("emits getStatusPageList and returns the statusPageList object", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "getStatusPageList") cb({ ok: true, statusPageList: { default: { id: 1 } } });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const action = findAction("list_status_pages");
+      const result = await action.handler({}, makeInstance());
+
+      expect(result).toEqual({ default: { id: 1 } });
+      expect(lastSocket.emit).toHaveBeenCalledWith("getStatusPageList", expect.any(Function));
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+  });
 });

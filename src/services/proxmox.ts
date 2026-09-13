@@ -53,6 +53,46 @@ const listStorageParams = z.object({
 
 const clusterStatusParams = z.object({});
 
+const updateGuestConfigParams = z.object({
+  node: z.string().min(1),
+  vmid: z.number().int().positive(),
+  type: z.enum(["qemu", "lxc"]),
+  cores: z.number().int().positive().optional(),
+  memory: z.number().int().positive().optional(),
+  description: z.string().optional(),
+});
+
+const snapshotRefParams = z.object({
+  node: z.string().min(1),
+  vmid: z.number().int().positive(),
+  type: z.enum(["qemu", "lxc"]),
+  snapname: z.string().min(1),
+});
+
+const createSnapshotParams = z.object({
+  node: z.string().min(1),
+  vmid: z.number().int().positive(),
+  type: z.enum(["qemu", "lxc"]),
+  snapname: z.string().min(1),
+  description: z.string().optional(),
+});
+
+const listBackupsParams = z.object({
+  node: z.string().min(1),
+  storage: z.string().min(1).optional(),
+});
+
+const nodeRefParams = z.object({
+  node: z.string().min(1),
+});
+
+const listUsersParams = z.object({});
+
+const getTaskStatusParams = z.object({
+  node: z.string().min(1),
+  upid: z.string().min(1),
+});
+
 /** Fetches guests of one type on one node, tagging each result with `node` and `type`. */
 async function fetchGuestsOnNode(
   client: ReturnType<typeof clientFor>,
@@ -222,6 +262,193 @@ function buildActions(): AnyActionDef[] {
     },
   };
 
+  const getGuestConfig: ActionDef<z.infer<typeof guestRefParams>> = {
+    id: "get_guest_config",
+    summary: "Get the configuration (cores, memory, disks, network, etc.) of one VM or LXC container.",
+    paramsSchema: guestRefParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.get(
+        `/nodes/${encodeURIComponent(params.node)}/${params.type}/${params.vmid}/config`
+      );
+      return unwrap(res.status, res.data, "get_guest_config");
+    },
+  };
+
+  const updateGuestConfig: ActionDef<z.infer<typeof updateGuestConfigParams>> = {
+    id: "update_guest_config",
+    summary: "Update the configuration (cores, memory, description) of one VM or LXC container.",
+    paramsSchema: updateGuestConfigParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const body: Record<string, unknown> = {};
+      if (params.cores !== undefined) body.cores = params.cores;
+      if (params.memory !== undefined) body.memory = params.memory;
+      if (params.description !== undefined) body.description = params.description;
+      const res = await client.put(
+        `/nodes/${encodeURIComponent(params.node)}/${params.type}/${params.vmid}/config`,
+        body
+      );
+      return unwrap(res.status, res.data, "update_guest_config");
+    },
+  };
+
+  const listSnapshots: ActionDef<z.infer<typeof guestRefParams>> = {
+    id: "list_snapshots",
+    summary: "List snapshots of one VM or LXC container.",
+    paramsSchema: guestRefParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.get(
+        `/nodes/${encodeURIComponent(params.node)}/${params.type}/${params.vmid}/snapshot`
+      );
+      return unwrap(res.status, res.data, "list_snapshots");
+    },
+  };
+
+  const createSnapshot: ActionDef<z.infer<typeof createSnapshotParams>> = {
+    id: "create_snapshot",
+    summary: "Create a new snapshot of one VM or LXC container.",
+    paramsSchema: createSnapshotParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const body: Record<string, unknown> = { snapname: params.snapname };
+      if (params.description !== undefined) body.description = params.description;
+      const res = await client.post(
+        `/nodes/${encodeURIComponent(params.node)}/${params.type}/${params.vmid}/snapshot`,
+        body
+      );
+      const upid = unwrap(res.status, res.data, "create_snapshot");
+      return { upid };
+    },
+  };
+
+  const deleteSnapshot: ActionDef<z.infer<typeof snapshotRefParams>> = {
+    id: "delete_snapshot",
+    summary: "Delete a snapshot of one VM or LXC container. Irreversible.",
+    paramsSchema: snapshotRefParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.delete(
+        `/nodes/${encodeURIComponent(params.node)}/${params.type}/${params.vmid}/snapshot/${encodeURIComponent(params.snapname)}`
+      );
+      const upid = unwrap(res.status, res.data, "delete_snapshot");
+      return { upid };
+    },
+  };
+
+  const rollbackSnapshot: ActionDef<z.infer<typeof snapshotRefParams>> = {
+    id: "rollback_snapshot",
+    summary: "Roll back one VM or LXC container to a snapshot, discarding current state. Irreversible.",
+    paramsSchema: snapshotRefParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.post(
+        `/nodes/${encodeURIComponent(params.node)}/${params.type}/${params.vmid}/snapshot/${encodeURIComponent(params.snapname)}/rollback`
+      );
+      const upid = unwrap(res.status, res.data, "rollback_snapshot");
+      return { upid };
+    },
+  };
+
+  const listBackups: ActionDef<z.infer<typeof listBackupsParams>> = {
+    id: "list_backups",
+    summary: "List backup archives on one node, either on a given storage or aggregated across all storages that support backups.",
+    paramsSchema: listBackupsParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const node = params.node;
+
+      if (params.storage) {
+        const res = await client.get(
+          `/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(params.storage)}/content`,
+          { params: { content: "backup" } }
+        );
+        return unwrap(res.status, res.data, "list_backups");
+      }
+
+      const storageRes = await client.get(`/nodes/${encodeURIComponent(node)}/storage`);
+      const storages = unwrap<Array<Record<string, unknown>>>(
+        storageRes.status,
+        storageRes.data,
+        "list_backups(storage)"
+      );
+
+      const results: Array<Record<string, unknown>> = [];
+      for (const storage of storages) {
+        const content = typeof storage.content === "string" ? storage.content : "";
+        if (!content.split(",").includes("backup")) continue;
+        const storageId = String(storage.storage);
+        const res = await client.get(
+          `/nodes/${encodeURIComponent(node)}/storage/${encodeURIComponent(storageId)}/content`,
+          { params: { content: "backup" } }
+        );
+        const items = unwrap<Array<Record<string, unknown>>>(
+          res.status,
+          res.data,
+          `list_backups(${storageId})`
+        );
+        results.push(...items.map((i) => ({ ...i, storage: storageId })));
+      }
+      return results;
+    },
+  };
+
+  const getNodeStatus: ActionDef<z.infer<typeof nodeRefParams>> = {
+    id: "get_node_status",
+    summary: "Get detailed node status: uptime, load average, memory, and CPU info.",
+    paramsSchema: nodeRefParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.get(`/nodes/${encodeURIComponent(params.node)}/status`);
+      return unwrap(res.status, res.data, "get_node_status");
+    },
+  };
+
+  const listUsers: ActionDef<z.infer<typeof listUsersParams>> = {
+    id: "list_users",
+    summary: "List Proxmox access-control users.",
+    paramsSchema: listUsersParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (_params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.get("/access/users");
+      return unwrap(res.status, res.data, "list_users");
+    },
+  };
+
+  const getTaskStatus: ActionDef<z.infer<typeof getTaskStatusParams>> = {
+    id: "get_task_status",
+    summary: "Get the status of a background task by UPID (e.g. to poll a start/stop/reboot/snapshot task).",
+    paramsSchema: getTaskStatusParams,
+    readOnly: true,
+    destructive: false,
+    handler: async (params, instance) => {
+      const client = clientFor(instance);
+      const res = await client.get(
+        `/nodes/${encodeURIComponent(params.node)}/tasks/${encodeURIComponent(params.upid)}/status`
+      );
+      return unwrap(res.status, res.data, "get_task_status");
+    },
+  };
+
   return [
     listNodes,
     listGuests,
@@ -232,6 +459,16 @@ function buildActions(): AnyActionDef[] {
     rebootGuest,
     listStorage,
     clusterStatus,
+    getGuestConfig,
+    updateGuestConfig,
+    listSnapshots,
+    createSnapshot,
+    deleteSnapshot,
+    rollbackSnapshot,
+    listBackups,
+    getNodeStatus,
+    listUsers,
+    getTaskStatus,
   ];
 }
 
