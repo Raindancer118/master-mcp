@@ -393,4 +393,86 @@ describe("uptimeKuma service", () => {
       expect(lastSocket.disconnect).toHaveBeenCalledOnce();
     });
   });
+
+  describe("create_status_page", () => {
+    it("emits addStatusPage with title and slug", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "addStatusPage") cb({ ok: true, slug: "public" });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const result = await findAction("create_status_page").handler({ title: "Status", slug: "public" }, makeInstance());
+
+      expect(result).toMatchObject({ ok: true, slug: "public" });
+      expect(lastSocket.emit).toHaveBeenCalledWith("addStatusPage", "Status", "public", expect.any(Function));
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it("throws when Kuma rejects the page", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else cb({ ok: false, msg: "slug exists" });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      await expect(findAction("create_status_page").handler({ title: "S", slug: "x" }, makeInstance())).rejects.toThrow(
+        /slug exists/
+      );
+    });
+  });
+
+  describe("save_status_page", () => {
+    it("merges the existing config and sends groups with monitor ids", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "getStatusPage")
+            cb({ ok: true, config: { slug: "public", title: "Old", theme: "auto", icon: "/icon.svg" } });
+          else if (event === "saveStatusPage") cb({ ok: true, publicGroupList: [] });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      await findAction("save_status_page").handler(
+        {
+          slug: "public",
+          title: "Systemstatus",
+          domainNames: ["status.example.de"],
+          groups: [{ name: "Websites", monitorIds: [1, 2] }],
+        },
+        makeInstance()
+      );
+
+      expect(lastSocket.emit).toHaveBeenCalledWith(
+        "saveStatusPage",
+        "public",
+        expect.objectContaining({
+          slug: "public",
+          title: "Systemstatus",
+          theme: "auto",
+          icon: "/icon.svg",
+          domainNameList: ["status.example.de"],
+          published: true,
+        }),
+        "/icon.svg",
+        [{ name: "Websites", monitorList: [{ id: 1 }, { id: 2 }] }],
+        expect.any(Function)
+      );
+      expect(lastSocket.disconnect).toHaveBeenCalledOnce();
+    });
+  });
 });

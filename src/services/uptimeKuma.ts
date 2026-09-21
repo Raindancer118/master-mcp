@@ -177,6 +177,24 @@ const editMonitorParams = z.object({
   active: z.boolean().optional(),
 });
 
+const createStatusPageParams = z.object({
+  title: z.string().min(1),
+  slug: z.string().min(1).regex(/^[a-z0-9-]+$/, "slug: lowercase letters, digits, dashes"),
+});
+
+const saveStatusPageParams = z.object({
+  slug: z.string().min(1),
+  title: z.string().min(1).optional(),
+  description: z.string().optional(),
+  footerText: z.string().optional(),
+  domainNames: z.array(z.string().min(1)).optional(),
+  showTags: z.boolean().optional(),
+  showPoweredBy: z.boolean().optional(),
+  showCertificateExpiry: z.boolean().optional(),
+  published: z.boolean().optional(),
+  groups: z.array(z.object({ name: z.string().min(1), monitorIds: z.array(z.number().int()) })),
+});
+
 const addMaintenanceParams = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
@@ -417,6 +435,56 @@ function buildActions(): AnyActionDef[] {
     },
   };
 
+  const createStatusPage: ActionDef<z.infer<typeof createStatusPageParams>> = {
+    id: "create_status_page",
+    summary: "Create an empty status page (title + slug). Fill it afterwards with save_status_page.",
+    paramsSchema: createStatusPageParams,
+    readOnly: false,
+    destructive: false,
+    handler: async (params, instance) => {
+      return withSession(instance, async ({ socket }) => {
+        const res = await emitAck<SimpleAck & { slug?: string }>(socket, "addStatusPage", [params.title, params.slug]);
+        if (!res.ok) throw new Error(res.msg ?? "create_status_page failed");
+        return res;
+      });
+    },
+  };
+
+  const saveStatusPage: ActionDef<z.infer<typeof saveStatusPageParams>> = {
+    id: "save_status_page",
+    summary:
+      "Configure a status page: title, description, footer, custom domains, visibility options and the full list of monitor groups (replaces existing groups). Unspecified settings keep their current value.",
+    paramsSchema: saveStatusPageParams,
+    readOnly: false,
+    destructive: true,
+    handler: async (params, instance) => {
+      return withSession(instance, async ({ socket }) => {
+        const current = await emitAck<SimpleAck & { config?: Record<string, unknown> }>(socket, "getStatusPage", [
+          params.slug,
+        ]);
+        if (!current.ok) throw new Error(current.msg ?? `status page "${params.slug}" not found`);
+        const config: Record<string, unknown> = { ...(current.config ?? {}), slug: params.slug };
+        if (params.title !== undefined) config.title = params.title;
+        if (params.description !== undefined) config.description = params.description;
+        if (params.footerText !== undefined) config.footerText = params.footerText;
+        if (params.domainNames !== undefined) config.domainNameList = params.domainNames;
+        if (params.showTags !== undefined) config.showTags = params.showTags;
+        if (params.showPoweredBy !== undefined) config.showPoweredBy = params.showPoweredBy;
+        if (params.showCertificateExpiry !== undefined) config.showCertificateExpiry = params.showCertificateExpiry;
+        config.published = params.published ?? config.published ?? true;
+        const groups = params.groups.map((g) => ({ name: g.name, monitorList: g.monitorIds.map((id) => ({ id })) }));
+        const res = await emitAck<SimpleAck>(socket, "saveStatusPage", [
+          params.slug,
+          config,
+          (config.icon as string | undefined) ?? "/icon.svg",
+          groups,
+        ]);
+        if (!res.ok) throw new Error(res.msg ?? "save_status_page failed");
+        return res;
+      });
+    },
+  };
+
   return [
     listMonitors,
     getMonitorBeats,
@@ -429,6 +497,8 @@ function buildActions(): AnyActionDef[] {
     listMaintenance,
     addMaintenance,
     listStatusPages,
+    createStatusPage,
+    saveStatusPage,
   ];
 }
 
