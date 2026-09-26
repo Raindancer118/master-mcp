@@ -1,6 +1,6 @@
 {
   "name": "master-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unified admin MCP server: Uptime Kuma, Nginx Proxy Manager / NPMPlus, Porkbun, Cloudflare, Docker, Proxmox, Authentik",
   "private": true,
   "type": "module",

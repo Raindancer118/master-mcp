@@ -183,6 +183,28 @@ describe("uptimeKuma service", () => {
     });
   });
 
+  describe("add_http_monitor", () => {
+    it("sends an empty conditions list (Uptime Kuma 2.x rejects NULL conditions)", async () => {
+      ioMock.mockImplementationOnce(() => {
+        const socket = createFakeSocket();
+        socket.emitImpl = (event: string, ...args: unknown[]) => {
+          const cb = args[args.length - 1] as (res: unknown) => void;
+          if (event === "login") cb({ ok: true });
+          else if (event === "add") cb({ ok: true, monitorID: 7 });
+        };
+        lastSocket = socket;
+        return socket;
+      });
+
+      const action = findAction("add_http_monitor");
+      const result = await action.handler({ name: "Site", url: "https://example.com" }, makeInstance());
+
+      expect(result).toEqual({ monitorId: 7 });
+      const addCall = lastSocket.emit.mock.calls.find((c) => c[0] === "add");
+      expect(addCall?.[1]).toMatchObject({ type: "http", url: "https://example.com", conditions: [] });
+    });
+  });
+
   describe("pause_monitor", () => {
     it("emits pauseMonitor with the given monitor id", async () => {
       ioMock.mockImplementationOnce(() => {

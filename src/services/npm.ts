@@ -194,7 +194,9 @@ const createProxyHostAction: ActionDef<z.infer<typeof createProxyHostParams>, un
         allow_websocket_upgrade: params.allowWebsocketUpgrade ?? true,
         http2_support: params.http2Support ?? false,
         certificate_id: params.certificateId ?? 0,
-        access_list_id: params.accessListId ?? 0,
+        // NPMPlus replaced access_list_id with npmplus_access_list_ids and rejects it as an
+        // additional property, so only send it when explicitly requested.
+        ...(params.accessListId !== undefined ? { access_list_id: params.accessListId } : {}),
         advanced_config: params.advancedConfig ?? "",
         meta: {},
       },
@@ -411,18 +413,26 @@ const requestLetsencryptCertificateAction: ActionDef<
   paramsSchema: requestLetsencryptCertificateParams,
   readOnly: false,
   destructive: false,
-  handler: async (params, instance) =>
-    npmRequest(instance, "post", "/nginx/certificates", {
-      data: {
-        provider: "letsencrypt",
-        domain_names: params.domainNames,
-        meta: {
-          letsencrypt_email: params.email,
-          letsencrypt_agree: params.agreeTos ?? true,
-          dns_challenge: false,
-        },
-      },
-    }),
+  handler: async (params, instance) => {
+    const request = (meta: Record<string, unknown>) =>
+      npmRequest(instance, "post", "/nginx/certificates", {
+        data: { provider: "letsencrypt", domain_names: params.domainNames, meta },
+      });
+    try {
+      return await request({
+        letsencrypt_email: params.email,
+        letsencrypt_agree: params.agreeTos ?? true,
+        dns_challenge: false,
+      });
+    } catch (err) {
+      // NPMPlus uses one global Let's Encrypt account and rejects any per-cert meta
+      // ("data/meta must NOT have additional properties") - retry with the empty meta it expects.
+      if (err instanceof Error && /meta must NOT have additional properties/i.test(err.message)) {
+        return request({});
+      }
+      throw err;
+    }
+  },
 };
 
 const certificateIdParams = z.object({ certificateId: z.number() });

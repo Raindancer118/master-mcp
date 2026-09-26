@@ -166,7 +166,6 @@ describe("npm service", () => {
           allow_websocket_upgrade: true,
           http2_support: false,
           certificate_id: 0,
-          access_list_id: 0,
           advanced_config: "",
           meta: {},
         })
@@ -181,6 +180,21 @@ describe("npm service", () => {
       );
 
       expect(result).toEqual({ id: 42, domain_names: ["example.com"] });
+    });
+
+    it("omits access_list_id unless one is given (NPMPlus rejects the field as an additional property)", async () => {
+      nock(BASE_URL).post("/api/tokens").twice().reply(200, { token: "jwt-token-xyz" });
+      nock(BASE_URL)
+        .post("/api/nginx/proxy-hosts", (body) => !("access_list_id" in body))
+        .reply(201, { id: 43 });
+      nock(BASE_URL)
+        .post("/api/nginx/proxy-hosts", (body) => body.access_list_id === 3)
+        .reply(201, { id: 44 });
+
+      const action = findAction("create_proxy_host");
+      const base = { domainNames: ["example.com"], forwardHost: "10.0.0.10", forwardPort: 8080 };
+      expect(await action.handler(base, makeInstance())).toEqual({ id: 43 });
+      expect(await action.handler({ ...base, accessListId: 3 }, makeInstance())).toEqual({ id: 44 });
     });
   });
 
@@ -378,6 +392,38 @@ describe("npm service", () => {
       );
 
       expect(result).toEqual({ id: 9, domain_names: ["example.com"] });
+    });
+
+    it("retries with an empty meta when NPMPlus rejects the per-cert letsencrypt meta", async () => {
+      nock(BASE_URL).post("/api/tokens").twice().reply(200, { token: "jwt-token-cert" });
+
+      nock(BASE_URL)
+        .post("/api/nginx/certificates", (body) => Object.keys(body.meta).length > 0)
+        .reply(400, {
+          error: { code: 400, message: "data/meta must NOT have additional properties, data/meta must NOT have additional properties" },
+        });
+      nock(BASE_URL)
+        .post("/api/nginx/certificates", { provider: "letsencrypt", domain_names: ["example.com"], meta: {} })
+        .matchHeader("Authorization", "Bearer jwt-token-cert")
+        .reply(201, { id: 10, domain_names: ["example.com"] });
+
+      const action = findAction("request_letsencrypt_certificate");
+      const result = await action.handler({ domainNames: ["example.com"], email: "admin@example.com" }, makeInstance());
+
+      expect(result).toEqual({ id: 10, domain_names: ["example.com"] });
+      expect(nock.isDone()).toBe(true);
+    });
+
+    it("does not retry on unrelated certificate errors", async () => {
+      nock(BASE_URL).post("/api/tokens").reply(200, { token: "jwt-token-cert" });
+      nock(BASE_URL)
+        .post("/api/nginx/certificates")
+        .reply(400, { error: { code: 400, message: "Some challenges have failed" } });
+
+      const action = findAction("request_letsencrypt_certificate");
+      await expect(
+        action.handler({ domainNames: ["example.com"], email: "admin@example.com" }, makeInstance())
+      ).rejects.toThrow(/Some challenges have failed/);
     });
   });
 

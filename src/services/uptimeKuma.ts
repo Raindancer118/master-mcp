@@ -313,6 +313,8 @@ function buildActions(): AnyActionDef[] {
           maxretries: 0,
           accepted_statuscodes: ["200-299"],
           notificationIDList: {},
+          // Uptime Kuma 2.x stores this as JSON in a NOT NULL column - omitting it fails the insert.
+          conditions: [],
         };
         const res = await emitAck<{ ok: boolean; msg?: string; monitorID?: number }>(socket, "add", [monitor]);
         if (!res.ok) throw new Error(res.msg ?? "add_http_monitor failed");
